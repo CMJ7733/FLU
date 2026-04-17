@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/d/miniconda/envs/zeolite/python.exe -c ':*)",
+      "Bash(PYTHONIOENCODING=utf-8 /d/miniconda/envs/zeolite/python.exe data/process_nextstrain.py)",
+      "Bash(PYTHONIOENCODING=utf-8 /d/miniconda/envs/zeolite/python.exe -c \"import py_compile; py_compile.compile\\('data/process_nextstrain.py', doraise=True\\); print\\('syntax OK'\\)\")",
+      "Bash(/d/miniconda/envs/zeolite/python.exe -c ' *)",
+      "Bash(python -c ' *)",
+      "Bash(git --version)"
+    ]
+  }
+}

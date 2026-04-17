@@ -1,0 +1,15 @@
+numpy>=1.24
+scipy>=1.11
+pandas>=2.0
+matplotlib>=3.7
+seaborn>=0.12
+SALib>=1.4
+lmfit>=1.2
+requests>=2.31
+openpyxl>=3.1
+pyyaml>=6.0
+plotly>=5.15
+kaleido>=0.2
+jupyter>=1.0
+notebook>=7.0
+ipykernel>=6.0

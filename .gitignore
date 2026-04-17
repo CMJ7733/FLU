@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Conda
+.conda/
+envs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Output & plots (keep structure, ignore content)
+output/*.txt
+output/*.png
+output/*.pdf
+plots/*.png
+plots/*.pdf
+
+# Data (raw data may be large/proprietary)
+data/raw/
+data/external/
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Julia (if any)
+*.jl.so

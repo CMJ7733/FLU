@@ -1,0 +1,103 @@
+# H3N2 上海高校传播动力学模型 — 全局参数配置
+# 修改此文件后，运行 python run_all.py 即可应用新参数
+
+model:
+  # ── 人口结构 ──────────────────────────────────
+  N1: 27000          # 学生总数（在校生）
+  N2: 3000           # 教职工总数
+
+  # ── 核心传播参数 ────────────────────────────────
+  # beta0 = 每次接触的传播概率（/接触），乘以接触矩阵后得传播率
+  # 对 H3N2: β × c₁₁ ≈ 0.015 × 18 = 0.27/天，R₀ ≈ 1.3
+  beta0: 0.015       # 每次接触传播概率，待拟合
+  sigma: 0.50        # 潜伏期转感染率 1/σ = 2天（H3N2潜伏期约2天）
+  gamma: 0.25        # 康复率 1/γ = 4天（感染期约4天）
+  gamma_Q: 0.20      # 隔离者康复率 1/γQ = 5天
+  alpha: 0.15        # 病例隔离率（常态监测水平）
+  p_iso: 0.40        # 感染者被发现并成功隔离的比例
+  omega: 0.0         # 免疫衰退率（单流行季设为0）
+
+  # ── 疫苗参数 ────────────────────────────────────
+  vax_coverage: 0.0032   # 上海高校生流感疫苗接种率 0.32%
+  vax_efficacy:  0.27    # H3N2 季节流感疫苗有效率（约27%）
+
+  # ── 季节参数（由 FluNet 谐波拟合自动覆盖） ──
+  delta1: 0.393      # 年振幅（相对于 β₀）
+  delta2: 0.524      # 半年振幅（相对于 β₀）
+  phi1:   0.417      # 年谐波相位（弧度）
+  phi2:  -0.535      # 半年谐波相位（弧度）
+
+  # ── 接触矩阵（2×2 群体：学生/教职工） ─────────
+  # c_ij = 群体i与群体j的日均有效接触次数
+  c11: 18.0          # 学生-学生（课堂+宿舍+食堂+课外活动）
+  c12: 2.0           # 学生-教职工（课堂+办公室）
+  c21: 2.0           # 教职工-学生（对称性调整）
+  c22: 8.0           # 教职工-教职工（办公室+会议）
+
+  # ── 初始条件 ──────────────────────────────────
+  I0_1: 5            # 初始感染学生数
+  I0_2: 1            # 初始感染教职工数
+
+  # ── 模拟时间配置 ──────────────────────────────
+  t_days: 180        # 模拟天数（默认180天，覆盖冬春季）
+  t_start_doy: 305   # 模拟起始日（一年中第几天，305=11月1日）
+
+data:
+  # WHO FluNet 数据配置
+  country_code: "CHN"
+  year_from: 2015
+  year_to: 2024
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+
+calibration:
+  # 参数拟合配置
+  method: "leastsq"           # lmfit 求解器（leastsq / nelder / powell）
+  max_iter: 100
+  bootstrap_n: 1000          # Bootstrap 重采样次数
+  ci_level: 0.95              # 置信水平
+
+  # 待拟合参数的上下界（beta0 为每次接触传播概率）
+  bounds:
+    beta0:  [0.003, 0.08]
+    delta1: [0.0,  0.70]
+    delta2: [0.0,  0.80]
+    phi1:   [-3.14159, 3.14159]
+    phi2:   [-3.14159, 3.14159]
+    alpha:  [0.01, 0.80]
+
+sensitivity:
+  # SALib PRCC 分析配置
+  n_samples: 1000             # Latin Hypercube 采样数
+  param_variation: 0.30       # 参数范围 ±30%
+  outputs:
+    - peak_infection_rate     # 峰值感染率
+    - total_attack_rate       # 累计发病率
+    - peak_timing_days        # 峰值时间（天）
+
+intervention:
+  # 干预措施效果系数（文献参考值）
+  mask_beta_reduction:      0.17   # 口罩降低 β 的比例
+  ventilation_indoor_reduction: 0.40  # 通风降低室内 β
+  disinfection_beta_reduction:  0.05  # 消毒降低 β
+  isolation_alpha_multiplier:   3.0   # 隔离加强后 α 的乘数上限
+  vax_target_coverage:          0.50  # 疫苗干预目标接种率
+
+  # 场所接触权重（归一化至1.0）
+  location_weights:
+    dorm:      0.30
+    classroom: 0.25
+    canteen:   0.10
+    outdoor:   0.35
+
+  # 优化目标权重
+  objective_weights:
+    attack_rate:   0.50        # 累计发病率权重
+    peak_pressure: 0.30        # 峰值压力权重
+    cost:          0.20        # 防控成本权重
+
+output:
+  figure_dir: "output/figures"
+  dpi: 300
+  format: "png"
+  font: "SimHei"              # 中文字体（Windows: SimHei，Mac/Linux: WenQuanYi Micro Hei）
