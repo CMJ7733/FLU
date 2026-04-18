@@ -54,12 +54,12 @@ def compute_R0(p: "ModelParams", t: float = 0.0) -> float:
     # 2×2 次代矩阵 K[i,j]：
     # 群体 j 中一个 I 进入群体 i 的易感人群，
     # 在其感染期（1/μ）内产生新暴露，再经 E→I（1/σ 约掉），最终新感染数
+    eta = p.eta_cross
     K = np.zeros((2, 2))
     for i in range(2):
         for j in range(2):
-            # F[i,j] = β(t)·c(t)·C[i,j]·S0[i]/N[j]
-            # K[i,j] = F[i,j] / μ  （V_I⁻¹ = 1/μ；σ 在 SEIQR 中约掉）
-            K[i, j] = beta * ct * C[i, j] * S0[i] / (N[j] * mu)
+            cross_factor = 1.0 if i == j else eta
+            K[i, j] = beta * ct * cross_factor * C[i, j] * S0[i] / (N[j] * mu)
 
     eigenvalues = np.linalg.eigvals(K)
     R0 = float(np.max(np.real(eigenvalues)))

@@ -108,3 +108,15 @@ def contact_matrix_from_literature() -> tuple[np.ndarray, str]:
     ])
     source = "基于 Prem et al. 2017 中国矩阵校园调整版"
     return C, source
+
+
+# ── 场所分解辅助函数 ─────────────────────────────────────────────────────────
+
+def c11_by_venue(p: "ModelParams") -> dict[str, float]:
+    """返回各场所的 c11 值（宿舍/教室/食堂/户外）。"""
+    return p.c11_by_venue()
+
+
+def beta_mod_by_venue(p: "ModelParams") -> dict[str, float]:
+    """返回各场所的 β 修饰系数（相对基础 β 的倍率）。"""
+    return p.beta_mod_by_venue()

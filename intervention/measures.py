@@ -115,11 +115,11 @@ def apply_interventions(
 
     效果公式（参考文献值）：
         u1 口罩：     β₀ × (1 - 0.17 × u1)
-        u2 通风：     β₀ × (1 - 0.40 × u2 × 室内权重比例)
+        u2 通风：     按宿舍/教室的 β修饰 加权分解效果
         u3 疫苗：     vax_coverage += u3 × (0.50 - coverage)  [上限 50%]
         u4 隔离强化： α × (1 + 3.0 × u4)                     [上限 1.0]
-        u5 线上教学： c₁₁ × (1 - 0.25 × u5), c₁₂ × (1 - 0.15 × u5)
-        u6 社团限流： c₁₁ × (1 - 0.35 × u6 × outdoor_weight)
+        u5 线上教学： c11_classroom × (1 - 0.25 × u5)（精准减少教室接触）
+        u6 社团限流： c11_outdoor × (1 - 0.35 × u6)（精准减少户外接触）
         u7 消毒：     β₀ × (1 - 0.05 × u7)
     """
     if location_weights is None:
@@ -131,11 +131,16 @@ def apply_interventions(
     # Cowling 2009: 外科口罩对飞沫/接触传播降低约 17%
     p = p.update(beta0=p.beta0 * (1.0 - 0.17 * bundle.mask_level))
 
-    # ── u2: 通风改善 ──────────────────────────────────────────────────────
-    # 仅作用于室内接触（宿舍+教室占总接触的 55%）
-    indoor_share  = location_weights["dorm"] + location_weights["classroom"]
-    vent_reduction = indoor_share * 0.40 * bundle.ventilation
-    p = p.update(beta0=p.beta0 * (1.0 - vent_reduction))
+    # ── u2: 通风改善（精细化到 per-venue β修饰）────────────────────────────
+    # 效果按宿舍/教室的 β修饰 加权分配（β修饰越大，该场所通风越重要）
+    total_indoor_beta = p.beta_dorm + p.beta_classroom
+    dorm_frac  = p.beta_dorm / total_indoor_beta      # 宿舍占室内 β 修饰的比例
+    class_frac = p.beta_classroom / total_indoor_beta # 教室占室内 β 修饰的比例
+    vent_eff = 0.40 * bundle.ventilation
+    p = p.update(
+        beta_dorm=max(p.beta_dorm * (1.0 - vent_eff * dorm_frac), 0.1),
+        beta_classroom=max(p.beta_classroom * (1.0 - vent_eff * class_frac), 0.1),
+    )
 
     # ── u3: 疫苗接种 ──────────────────────────────────────────────────────
     # 将接种率提升至目标值（0.50），按 u3 比例线性插值
@@ -148,21 +153,21 @@ def apply_interventions(
     new_alpha = min(p.alpha * (1.0 + 3.0 * bundle.isolation_rate), 1.0)
     p = p.update(alpha=new_alpha)
 
-    # ── u5: 线上教学 ──────────────────────────────────────────────────────
-    # 减少教室接触（学生间 c₁₁ 降低教室权重部分，学生-教职工 c₁₂ 减少一半效果）
-    classroom_w   = location_weights["classroom"]
-    c11_reduction = classroom_w * bundle.online_teaching
-    c12_reduction = classroom_w * 0.5 * bundle.online_teaching
+    # ── u5: 线上教学（精准减少教室 c11）───────────────────────────────────
+    # 教室接触 = c11_classroom（宿舍/食堂/户外不变）
+    # 效果分数 = 0.25 × u5（25% 教室接触减少）
+    u5_eff = 0.25 * bundle.online_teaching
     p = p.update(
-        c11=p.c11 * (1.0 - c11_reduction),
-        c12=p.c12 * (1.0 - c12_reduction),
-        c21=p.c21 * (1.0 - c12_reduction),
+        c11_classroom=max(p.c11_classroom * (1.0 - u5_eff), 0.1),
+        c12=max(p.c12 * (1.0 - u5_eff * 0.5), 0.1),
+        c21=max(p.c21 * (1.0 - u5_eff * 0.5), 0.1),
     )
 
-    # ── u6: 社团/课外活动限流 ────────────────────────────────────────────
-    outdoor_w     = location_weights["outdoor"]
-    c11_outdoor   = outdoor_w * 0.70 * bundle.activity_limit
-    p = p.update(c11=p.c11 * (1.0 - c11_outdoor))
+    # ── u6: 社团/课外活动限流（精准减少户外 c11）──────────────────────────
+    # 户外接触 = c11_outdoor（宿舍/教室/食堂不变）
+    # 效果分数 = 0.35 × u6（35% 户外接触减少）
+    u6_eff = 0.35 * bundle.activity_limit
+    p = p.update(c11_outdoor=max(p.c11_outdoor * (1.0 - u6_eff), 0.1))
 
     # ── u7: 环境消毒 ──────────────────────────────────────────────────────
     p = p.update(beta0=p.beta0 * (1.0 - 0.05 * bundle.disinfection))

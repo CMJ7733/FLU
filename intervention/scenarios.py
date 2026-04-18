@@ -40,7 +40,8 @@ class Scenario:
         if self.alpha_override is not None:
             updates["alpha"] = self.alpha_override
         if self.cluster_factor != 1.0:
-            updates["c11"] = p.c11 * self.cluster_factor
+            # 精准作用于宿舍接触（聚集疫情主要在宿舍传播）
+            updates["c11_dorm"] = p.c11_dorm * self.cluster_factor
 
         return p.update(**updates)
 
@@ -71,7 +72,7 @@ SCENARIOS: dict[str, Scenario] = {
             "代表典型校园流感暴发事件初期（2019年上海某高校）。"
         ),
         I0_1=20, I0_2=2,
-        t_days=120,
+        t_days=180,
         t_start_doy=305,
         beta0_override=None,
         alpha_override=0.10,   # 尚未全面启动隔离，实际隔离率偏低
@@ -86,7 +87,7 @@ SCENARIOS: dict[str, Scenario] = {
             "代表极端密集接触情景，用于压力测试防控方案。"
         ),
         I0_1=30, I0_2=1,
-        t_days=90,
+        t_days=180,
         t_start_doy=305,
         beta0_override=None,
         alpha_override=0.08,   # 聚集初期发现延迟，隔离率更低

@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 
 from .seasonal import beta_t, contact_t
 
+VENUE_NAMES = ["dorm", "classroom", "canteen", "outdoor"]
+
 
 def seiqr_rhs(y: np.ndarray, t: float, p: "ModelParams") -> np.ndarray:
     """
@@ -52,18 +54,30 @@ def seiqr_rhs(y: np.ndarray, t: float, p: "ModelParams") -> np.ndarray:
     N2 = float(p.N2)
 
     # ── 当前时刻的传播参数 ──────────────────────────────────────────────────
-    beta  = beta_t(t, p)         # 季节传播系数 β(t)
-    ct    = contact_t(t, p)      # 学期调制系数 c(t)
-    C     = p.contact_matrix()   # 2×2 接触矩阵
+    beta      = beta_t(t, p)           # 季节传播系数 β(t)
+    ct        = contact_t(t, p)        # 学期调制系数 c(t)
+    C         = p.contact_matrix()     # 2×2 聚合接触矩阵（跨群体用）
+    C_v       = p.contact_matrix_per_venue()   # per-venue 接触矩阵
+    beta_mod  = p.beta_mod_by_venue()           # per-venue β 修饰系数
 
     # ── 感染压力（力感染项）λᵢ ─────────────────────────────────────────────
-    # λᵢ = β(t) · c(t) · [Cᵢ₁ · I₁/N₁ + Cᵢ₂ · I₂/N₂]
+    # λᵢ = β(t) · c(t) · Σⱼ [Cᵢⱼ · Iⱼ / Nⱼ]
+    # 学生群体：各场所贡献之和（β修饰 × c11_venue）+ 跨群体贡献
+    # 教职工群体：聚合矩阵（不区分场所）
     # 防止数值上 I 出现极小负值（ODE 积分舍入误差）
     I1_safe = max(I1, 0.0)
     I2_safe = max(I2, 0.0)
 
-    lam1 = beta * ct * (C[0, 0] * I1_safe / N1 + C[0, 1] * I2_safe / N2)
-    lam2 = beta * ct * (C[1, 0] * I1_safe / N1 + C[1, 1] * I2_safe / N2)
+    eta = p.eta_cross  # 跨群体传播衰减系数
+
+    # 学生：Σ_v [β·ct·β_mod_v·c11_v·I1/N1] + η·β·ct·C[0,1]·I2/N2
+    lam1 = (sum(
+        beta * ct * beta_mod[v] * C_v[v][0, 0] * I1_safe / N1
+        for v in VENUE_NAMES
+    ) + eta * beta * ct * C[0, 1] * I2_safe / N2)
+
+    # 教职工：η衰减的跨群体项 + 群体内项
+    lam2 = beta * ct * (eta * C[1, 0] * I1_safe / N1 + C[1, 1] * I2_safe / N2)
 
     # ── 各仓室离开速率 ──────────────────────────────────────────────────────
     sigma   = p.sigma

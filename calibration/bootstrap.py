@@ -28,6 +28,7 @@ def bootstrap_params(
     random_seed: int = 42,
     t_col: str = "t_sim",
     y_col: str = "h3n2_pos_rate",
+    max_nfev: int = 500,
 ) -> dict:
     """
     Bootstrap 参数置信区间估计。
@@ -71,7 +72,7 @@ def bootstrap_params(
         result = fit_model(
             obs_boot, p_init,
             bounds=bounds, method=method,
-            max_nfev=500, t_col=t_col, y_col=y_col,
+            max_nfev=max_nfev, t_col=t_col, y_col=y_col,
         )
 
         if result.success:
@@ -119,6 +120,7 @@ def bootstrap_trajectory(
     random_seed: int = 42,
     t_col: str = "t_sim",
     y_col: str = "h3n2_pos_rate",
+    max_nfev: int = 500,
 ) -> dict:
     """
     Bootstrap 模拟轨迹置信带。
@@ -154,7 +156,7 @@ def bootstrap_trajectory(
         result = fit_model(
             obs_boot, p_init,
             bounds=bounds, method=method,
-            max_nfev=500, t_col=t_col, y_col=y_col,
+            max_nfev=max_nfev, t_col=t_col, y_col=y_col,
         )
 
         if result.success:

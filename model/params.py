@@ -19,6 +19,9 @@ try:
 except ImportError:
     _HAS_YAML = False
 
+# ── 场所名称常量 ─────────────────────────────────────────────────────────────
+VENUE_NAMES = ["dorm", "classroom", "canteen", "outdoor"]
+
 
 @dataclass
 class ModelParams:
@@ -46,10 +49,28 @@ class ModelParams:
     phi2:   float = 0.0    # 半年相位（弧度）
 
     # ── 接触矩阵元素（2×2 群体，单位：次/天） ────────────────────────────────
-    c11: float = 18.0      # 学生-学生
+    c11: float = 18.0      # 学生-学生（总接触，venue之和）
     c12: float = 2.0       # 学生-教职工
     c21: float = 2.0       # 教职工-学生
-    c22: float = 8.0       # 教职工-教职工
+    c22: float = 8.0        # 教职工-教职工
+
+    # ── 场所分解：学生-学生接触按场所分解 ──────────────────────────────────
+    # c11 = c11_dorm + c11_classroom + c11_canteen + c11_outdoor
+    c11_dorm:      float = 6.0   # 宿舍：0.30×18
+    c11_classroom: float = 4.5   # 教室：0.25×18
+    c11_canteen:   float = 1.8   # 食堂：0.10×18
+    c11_outdoor:   float = 5.7   # 户外：0.35×18（调平，总和=18.0）
+
+    # ── 场所 β 修饰系数（相对基础 β 的倍率） ──────────────────────────────
+    # β_eff(venue) = β(t) × c(t) × β_mod_venue
+    beta_dorm:      float = 1.30  # 宿舍：密闭、高密度、长时间 → 最高传播
+    beta_classroom: float = 1.10  # 教室：有通风、中等密度
+    beta_canteen:   float = 0.80  # 食堂：接触短、相对低风险
+    beta_outdoor:   float = 0.60  # 户外：通风最好、低密度
+
+    # ── 跨群体传播衰减系数 ──────────────────────────────────────────────────
+    # 师生接触比同群体内接触更短暂、更正式，传播效率更低
+    eta_cross: float = 0.70  # η∈(0,1]，作用于接触矩阵非对角项
 
     # ── 初始条件 ──────────────────────────────────────────────────────────────
     I0_1: int = 5          # 初始感染学生数
@@ -93,11 +114,49 @@ class ModelParams:
         ], dtype=float)
 
     def contact_matrix(self) -> np.ndarray:
-        """返回 2×2 日均有效接触矩阵。"""
+        """
+        返回 2×2 日均有效接触矩阵。
+        [0,0] 使用 c11_total（venue之和），保证向后兼容。
+        """
         return np.array([
-            [self.c11, self.c12],
+            [self.c11_total, self.c12],
             [self.c21, self.c22],
         ], dtype=float)
+
+    # ── 场所分解 ──────────────────────────────────────────────────────────────
+
+    @property
+    def c11_total(self) -> float:
+        """四个场所 c11 之和（向后兼容 p.c11）。"""
+        return self.c11_dorm + self.c11_classroom + self.c11_canteen + self.c11_outdoor
+
+    def c11_by_venue(self) -> dict[str, float]:
+        """返回各场所的 c11 值。"""
+        return dict(zip(VENUE_NAMES, [
+            self.c11_dorm, self.c11_classroom,
+            self.c11_canteen, self.c11_outdoor,
+        ]))
+
+    def beta_mod_by_venue(self) -> dict[str, float]:
+        """返回各场所的 β 修饰系数。"""
+        return dict(zip(VENUE_NAMES, [
+            self.beta_dorm, self.beta_classroom,
+            self.beta_canteen, self.beta_outdoor,
+        ]))
+
+    def contact_matrix_per_venue(self) -> dict[str, np.ndarray]:
+        """
+        返回 per-venue 2×2 接触矩阵字典。
+        每个 venue 矩阵的 [0,0] 为该 venue 的 c11_v，
+        [0,1]=c12, [1,0]=c21, [1,1]=c22（跨群体接触不区分场所）。
+        """
+        matrices = {}
+        for v, c11_v in self.c11_by_venue().items():
+            matrices[v] = np.array([
+                [c11_v, self.c12],
+                [self.c21, self.c22],
+            ], dtype=float)
+        return matrices
 
     def to_dict(self) -> dict:
         """序列化为字典。"""
@@ -166,5 +225,8 @@ class ModelParams:
             f"ModelParams(N1={self.N1}, N2={self.N2}, "
             f"β₀={self.beta0:.3f}, σ={self.sigma:.3f}, γ={self.gamma:.3f}, "
             f"α={self.alpha:.3f}, p_iso={self.p_iso:.3f}, "
-            f"δ₁={self.delta1:.3f}, δ₂={self.delta2:.3f})"
+            f"δ₁={self.delta1:.3f}, δ₂={self.delta2:.3f}, "
+            f"c11_total={self.c11_total:.1f}, "
+            f"β_mod={{dorm={self.beta_dorm}, class={self.beta_classroom}, "
+            f"canteen={self.beta_canteen}, out={self.beta_outdoor}}})"
         )

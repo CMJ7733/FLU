@@ -196,15 +196,17 @@ def step_bootstrap(p, obs_df, fast: bool = False):
     log.info("Step 3: Bootstrap 置信区间")
     log.info("=" * 60)
 
-    n_boot = 100 if fast else 500
-    ci_result = bootstrap_params(obs_df, p, n_bootstrap=n_boot)
+    n_boot   = 50  if fast else 500
+    nfev     = 150 if fast else 500
+    n_traj   = 100  if fast else 200
+    ci_result = bootstrap_params(obs_df, p, n_bootstrap=n_boot, max_nfev=nfev)
 
     if ci_result:
         log.info("参数 95% CI:")
         for name, ci in ci_result.get("param_ci", {}).items():
             log.info(f"  {name}: [{ci['lo']:.4f}, {ci['hi']:.4f}]  mean={ci['mean']:.4f}")
 
-    traj = bootstrap_trajectory(obs_df, p, n_bootstrap=min(n_boot, 200))
+    traj = bootstrap_trajectory(obs_df, p, n_bootstrap=n_traj, max_nfev=nfev)
     return ci_result, traj
 
 

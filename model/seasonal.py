@@ -44,7 +44,7 @@ def beta_t(t: float, p: "ModelParams") -> float:
     t_abs = (p.t_start_doy + t) % 365
     annual     = p.delta1 * np.cos(2 * np.pi * t_abs / 365 + p.phi1)
     semiannual = p.delta2 * np.cos(4 * np.pi * t_abs / 365 + p.phi2)
-    return p.beta0 * (1.0 + annual + semiannual)
+    return max(p.beta0 * (1.0 + annual + semiannual), 0.0)
 
 
 def contact_t(t: float, p: "ModelParams") -> float:
