@@ -229,6 +229,100 @@ def plot_pareto_frontier(
     return fig
 
 
+def plot_before_after_intervention(
+    comparison:  dict,
+    metric:      str = "I_rate",
+    title:       str = "最优防控方案干预前后对比",
+    output_path: str | Path | None = None,
+    show:        bool = False,
+) -> plt.Figure:
+    """
+    干预前后感染曲线对比图（每个场景一个子图）。
+
+    Args:
+        comparison: 结构 = {
+            scenario_name: {
+                "before":  DataFrame (solve_seiqr 输出，无干预),
+                "after":   DataFrame (solve_seiqr 输出，施加最优方案),
+                "bundle":  InterventionBundle,
+                "ar_before": float,
+                "ar_after":  float,
+                "peak_before": float,
+                "peak_after":  float,
+            }
+        }
+        metric: 绘制指标列名（默认 I_rate）
+    """
+    setup_style()
+
+    names = list(comparison.keys())
+    n = len(names)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 6), squeeze=False)
+    axes = axes[0]
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=1.02)
+
+    for ax, name in zip(axes, names):
+        d = comparison[name]
+        df_b, df_a = d["before"], d["after"]
+
+        ax.plot(df_b["t"], df_b[metric],
+                color=COLORS["baseline"], linewidth=2.2, linestyle="--",
+                label="无干预", alpha=0.9)
+        ax.plot(df_a["t"], df_a[metric],
+                color=COLORS["danger"], linewidth=2.5, linestyle="-",
+                label="最优方案", alpha=0.95)
+
+        # 峰值标注
+        ib = int(df_b[metric].values.argmax())
+        ia = int(df_a[metric].values.argmax())
+        ax.scatter([df_b["t"].iloc[ib]], [df_b[metric].iloc[ib]],
+                   color=COLORS["baseline"], s=40, zorder=5)
+        ax.scatter([df_a["t"].iloc[ia]], [df_a[metric].iloc[ia]],
+                   color=COLORS["danger"], s=50, zorder=5)
+
+        # 指标文本框
+        ar_b, ar_a = d["ar_before"], d["ar_after"]
+        pk_b, pk_a = d["peak_before"], d["peak_after"]
+        ar_red = (1 - ar_a / max(ar_b, 1e-9)) * 100
+        pk_red = (1 - pk_a / max(pk_b, 1e-9)) * 100
+        bundle = d["bundle"]
+        u_text = (
+            f"u = ({bundle.mask_level:.1f}, {bundle.ventilation:.1f}, "
+            f"{bundle.vaccination:.1f}, {bundle.isolation_rate:.1f}, "
+            f"{bundle.online_teaching:.1f}, {bundle.activity_limit:.1f}, "
+            f"{bundle.disinfection:.1f})"
+        )
+        info = (
+            f"AR:   {ar_b:.1%} → {ar_a:.1%}  (↓{ar_red:.1f}%)\n"
+            f"峰值: {pk_b:.1%} → {pk_a:.1%}  (↓{pk_red:.1f}%)\n"
+            f"{u_text}"
+        )
+        ax.text(0.03, 0.97, info, transform=ax.transAxes,
+                fontsize=9.5, va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.5",
+                          facecolor="white", edgecolor=COLORS["baseline"], alpha=0.9))
+
+        ax.set_title(name, fontsize=13, fontweight="bold")
+        ax.set_xlabel("模拟天数（天）")
+        if "rate" in metric:
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1%}"))
+            ax.set_ylabel("感染率")
+        else:
+            ax.set_ylabel(metric)
+        ax.legend(loc="upper right", fontsize=10)
+
+    plt.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig
+
+
 def _pareto_mask(
     x: np.ndarray,
     y: np.ndarray,

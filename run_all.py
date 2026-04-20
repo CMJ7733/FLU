@@ -312,24 +312,32 @@ def step_scenarios(p):
 # ── Step 7: 防控方案优化 ────────────────────────────────────────────────────
 
 def step_optimization(p, fast: bool = False):
-    """对场景二/三进行防控方案网格优化。"""
+    """对场景二/三进行 NSGA-II 多目标防控方案优化，并输出干预前后对比图。"""
     from intervention.scenarios import SCENARIOS
-    from intervention.optimizer import grid_search
-    from plots.intervention_compare import plot_intervention_heatmap, plot_pareto_frontier
+    from intervention.optimizer import nsga2_optimize
+    from intervention.measures import InterventionBundle, apply_interventions
+    from model.solver import solve_seiqr, extract_summary
+    from plots.intervention_compare import (
+        plot_intervention_heatmap, plot_pareto_frontier,
+        plot_before_after_intervention,
+    )
 
     log.info("=" * 60)
-    log.info("Step 7: 防控方案优化")
+    log.info("Step 7: 防控方案优化 (NSGA-II)")
     log.info("=" * 60)
 
-    n_levels = 3 if fast else 5
+    pop_size = 30 if fast else 60
+    n_gen    = 20 if fast else 50
+
+    comparison: dict = {}
 
     for sc_name in ["outbreak", "cluster"]:
         scenario = SCENARIOS[sc_name]
         log.info(f"\n优化场景: {scenario.name}")
 
-        df_opt = grid_search(
+        df_opt = nsga2_optimize(
             p, scenario,
-            n_levels=n_levels,
+            pop_size=pop_size, n_gen=n_gen,
             cost_limit=0.65,
             output_dir=ROOT / "output" / "optimization",
             top_k=20,
@@ -361,6 +369,39 @@ def step_optimization(p, fast: bool = False):
                 f"AR降低={row.get('AR_reduction_pct', 0):.1f}%  "
                 f"Cost={row.get('cost_score', 0):.3f}"
             )
+
+        # ── 干预前后对比数据 ──
+        best = df_opt.iloc[0]
+        best_bundle = InterventionBundle(
+            mask_level     = float(best["mask_level"]),
+            ventilation    = float(best["ventilation"]),
+            vaccination    = float(best["vaccination"]),
+            isolation_rate = float(best["isolation_rate"]),
+            online_teaching= float(best["online_teaching"]),
+            activity_limit = float(best["activity_limit"]),
+            disinfection   = float(best["disinfection"]),
+        )
+        p_sc       = scenario.apply_to(p)
+        df_before  = solve_seiqr(p_sc)
+        df_after   = solve_seiqr(apply_interventions(p_sc, best_bundle))
+        summ_b     = extract_summary(df_before, p_sc)
+        summ_a     = extract_summary(df_after,  p_sc)
+        comparison[scenario.name] = {
+            "before": df_before, "after": df_after,
+            "bundle": best_bundle,
+            "ar_before":   summ_b["total_attack_rate"],
+            "ar_after":    summ_a["total_attack_rate"],
+            "peak_before": summ_b["peak_I_rate"],
+            "peak_after":  summ_a["peak_I_rate"],
+        }
+
+    if comparison:
+        plot_before_after_intervention(
+            comparison,
+            title="最优防控方案干预前后感染曲线对比",
+            output_path=FIG_DIR / "08_intervention_before_after.png",
+        )
+        log.info(f"干预前后对比图已保存: {FIG_DIR / '08_intervention_before_after.png'}")
 
     return True
 

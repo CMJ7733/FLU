@@ -89,9 +89,9 @@ SCENARIOS: dict[str, Scenario] = {
         I0_1=30, I0_2=1,
         t_days=180,
         t_start_doy=305,
-        beta0_override=None,
+        beta0_override=0.022,  # 宿舍密闭环境 β 提升约47%
         alpha_override=0.08,   # 聚集初期发现延迟，隔离率更低
-        cluster_factor=1.50,   # 宿舍楼内接触率 ×1.5
+        cluster_factor=2.50,   # 宿舍楼内接触率 ×2.5（c11_dorm: 6→15）
     ),
 }
 

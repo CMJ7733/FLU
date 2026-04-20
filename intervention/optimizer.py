@@ -11,6 +11,7 @@ intervention/optimizer.py — 防控方案多目标优化
 优化策略：
     1. 参数网格扫描（暴力搜索，简单可靠，适合 4–5 维）
     2. scipy.optimize.differential_evolution（全局优化）
+    3. NSGA-II 多目标遗传算法（pymoo，直接输出 Pareto 前沿）
 
 网格扫描策略：
     - 对每类措施取 5 个离散级别（0, 0.25, 0.5, 0.75, 1.0）
@@ -263,3 +264,182 @@ def differential_evolution_optimize(
         "de_result":  result,
         "baseline_AR": baseline_AR,
     }
+
+
+# ── NSGA-II 多目标优化 ─────────────────────────────────────────────────────
+
+_U_FIELDS = [
+    "mask_level", "ventilation", "vaccination",
+    "isolation_rate", "online_teaching", "activity_limit", "disinfection"
+]
+
+
+def _bundle_from_vec(x) -> InterventionBundle:
+    """将长度 7 的决策向量还原为 InterventionBundle（顺序与 _U_FIELDS 一致）。"""
+    return InterventionBundle(
+        mask_level     = float(x[0]),
+        ventilation    = float(x[1]),
+        vaccination    = float(x[2]),
+        isolation_rate = float(x[3]),
+        online_teaching= float(x[4]),
+        activity_limit = float(x[5]),
+        disinfection   = float(x[6]),
+    )
+
+
+def nsga2_optimize(
+    base_params,
+    scenario,
+    pop_size:   int = 60,
+    n_gen:      int = 50,
+    cost_limit: float = 0.65,
+    weights:    dict | None = None,
+    seed:       int = 42,
+    output_dir: str | Path | None = None,
+    top_k:      int = 20,
+) -> pd.DataFrame:
+    """
+    使用 NSGA-II 做 3 目标（AR_norm, PIP_norm, Cost）最小化。
+
+    Args:
+        base_params:  ModelParams 基础参数
+        scenario:     Scenario 实例
+        pop_size:     种群大小
+        n_gen:        演化代数
+        cost_limit:   成本上限（以不等式约束 G = cost - cost_limit ≤ 0 处理）
+        weights:      用于二次排序的加权 F 权重（与 grid_search 一致）
+        seed:         随机种子
+        output_dir:   结果保存路径
+        top_k:        按加权 F 升序返回的前 k 个方案
+
+    Returns:
+        DataFrame（top_k 条，列与 grid_search 一致）
+    """
+    from pymoo.algorithms.moo.nsga2 import NSGA2
+    from pymoo.core.problem import ElementwiseProblem
+    from pymoo.optimize import minimize as pymoo_minimize
+    from model.solver import solve_seiqr, extract_summary
+
+    if weights is None:
+        weights = {"attack_rate": 0.50, "peak_pressure": 0.30, "cost": 0.20}
+
+    # 基准（无干预）
+    p_base = scenario.apply_to(base_params)
+    df_base = solve_seiqr(p_base)
+    summ_base = extract_summary(df_base, p_base)
+    baseline_AR  = summ_base["total_attack_rate"]
+    baseline_PIP = summ_base["peak_I_rate"]
+
+    log.info(f"基准: AR={baseline_AR:.4f}, PeakI={baseline_PIP:.4f}")
+    log.info(f"NSGA-II: pop={pop_size}, n_gen={n_gen}, cost≤{cost_limit}")
+
+    class _InterventionProblem(ElementwiseProblem):
+        def __init__(self):
+            super().__init__(
+                n_var=7, n_obj=3, n_ieq_constr=1,
+                xl=np.zeros(7), xu=np.ones(7),
+            )
+
+        def _evaluate(self, x, out, *args, **kwargs):
+            bundle = _bundle_from_vec(x)
+            try:
+                rec = _evaluate_bundle(bundle, base_params, scenario)
+            except Exception as e:
+                log.debug(f"NSGA-II 评估失败 x={x}: {e}")
+                out["F"] = [1e3, 1e3, 1.0]
+                out["G"] = [1.0]
+                return
+
+            ar_norm  = rec["attack_rate"] / max(baseline_AR, 1e-6)
+            pip_norm = rec["peak_I_rate"] / max(baseline_PIP, 1e-6)
+            cost     = rec["cost_score"]
+
+            out["F"] = [ar_norm, pip_norm, cost]
+            out["G"] = [cost - cost_limit]
+
+    problem   = _InterventionProblem()
+    algorithm = NSGA2(pop_size=pop_size)
+
+    res = pymoo_minimize(
+        problem, algorithm,
+        termination=("n_gen", n_gen),
+        seed=seed, verbose=False, save_history=False,
+    )
+
+    # 收集最终种群 + 全部演化评估，去重后排序
+    rows: list[dict] = []
+    seen: set[tuple] = set()
+
+    def _ingest(x_vec):
+        bundle = _bundle_from_vec(x_vec)
+        key = tuple(round(v, 4) for v in x_vec)
+        if key in seen:
+            return key
+        seen.add(key)
+        try:
+            rec = _evaluate_bundle(bundle, base_params, scenario)
+        except Exception:
+            return key
+        if rec["cost_score"] > cost_limit + 1e-9:
+            return key
+        ar_norm  = rec["attack_rate"] / max(baseline_AR, 1e-6)
+        pip_norm = rec["peak_I_rate"] / max(baseline_PIP, 1e-6)
+        F = (weights["attack_rate"]   * ar_norm +
+             weights["peak_pressure"] * pip_norm +
+             weights["cost"]          * rec["cost_score"])
+        # 补充原始 u 字段名（_evaluate_bundle 只回传 u1_mask 这类别名）
+        rec["mask_level"]      = bundle.mask_level
+        rec["ventilation"]     = bundle.ventilation
+        rec["vaccination"]     = bundle.vaccination
+        rec["isolation_rate"]  = bundle.isolation_rate
+        rec["online_teaching"] = bundle.online_teaching
+        rec["activity_limit"]  = bundle.activity_limit
+        rec["disinfection"]    = bundle.disinfection
+        rec["_dedup_key"]      = key
+        rec["F_objective"]       = F
+        rec["AR_reduction_pct"]  = (1 - ar_norm) * 100
+        rec["PIP_reduction_pct"] = (1 - pip_norm) * 100
+        rec["_pareto_rank0"]     = False
+        rows.append(rec)
+        return key
+
+    # Pareto 前沿（rank 0）先入表，避免被最终种群的四舍五入键漏掉
+    pareto_X = res.X
+    if pareto_X is not None and pareto_X.size > 0:
+        if pareto_X.ndim == 1:
+            pareto_X = pareto_X.reshape(1, -1)
+        pareto_keys = {tuple(round(v, 4) for v in x_vec) for x_vec in pareto_X}
+        for x_vec in pareto_X:
+            _ingest(x_vec)
+    else:
+        pareto_keys = set()
+
+    # 最终种群（含被支配解，可观察多样性）
+    X_final = res.pop.get("X") if res.pop is not None else None
+    if X_final is not None:
+        for x_vec in X_final:
+            _ingest(x_vec)
+
+    for rec in rows:
+        if rec["_dedup_key"] in pareto_keys:
+            rec["_pareto_rank0"] = True
+
+    if not rows:
+        log.error("NSGA-II 未产生可行解！请放宽 cost_limit 或增加 n_gen。")
+        return pd.DataFrame()
+
+    df_full   = pd.DataFrame(rows).drop(columns=["_dedup_key"]).sort_values("F_objective").reset_index(drop=True)
+    df_pareto = df_full[df_full["_pareto_rank0"]].sort_values("F_objective").reset_index(drop=True)
+
+    log.info(f"NSGA-II 完成：可行解 {len(df_full)} 个，Pareto 前沿 {len(df_pareto)} 个")
+
+    if output_dir is not None:
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        tag = scenario.name[:4]
+        df_full.to_csv(out_path / f"nsga2_full_{tag}.csv", index=False)
+        df_pareto.to_csv(out_path / f"nsga2_pareto_{tag}.csv", index=False)
+        df_full.head(top_k).to_csv(out_path / f"top{top_k}_{tag}.csv", index=False)
+        log.info(f"结果已保存至 {out_path}")
+
+    return df_full.head(top_k) if top_k else df_full
