@@ -323,6 +323,169 @@ def plot_before_after_intervention(
     return fig
 
 
+def plot_pareto_3d(
+    results_df:  pd.DataFrame,
+    title:       str = "NSGA-II 三目标 Pareto 前沿",
+    output_path: str | Path | None = None,
+    show:        bool = False,
+) -> plt.Figure:
+    """NSGA-II 三目标空间 3D 散点图。
+
+    - 灰色点 = 全部可行解（被支配）
+    - 红色点 = Pareto 前沿（_pareto_rank0=True）
+    - 金色星标 = 加权 F 最小的 top-1 方案
+    三轴：AR（累计发病率）、PIP（峰值感染率）、Cost（成本）。
+    """
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    setup_style()
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_title(title, fontsize=13, fontweight="bold")
+
+    if "_pareto_rank0" in results_df.columns:
+        mask_pareto = results_df["_pareto_rank0"].astype(bool).values
+    else:
+        mask_pareto = np.zeros(len(results_df), dtype=bool)
+
+    x = results_df["attack_rate"].values * 100
+    y = results_df["peak_I_rate"].values * 100
+    z = results_df["cost_score"].values
+
+    dom_mask = ~mask_pareto
+    if dom_mask.any():
+        ax.scatter(x[dom_mask], y[dom_mask], z[dom_mask],
+                   c=COLORS["baseline"], s=16, alpha=0.35, label="可行解")
+    if mask_pareto.any():
+        ax.scatter(x[mask_pareto], y[mask_pareto], z[mask_pareto],
+                   c=COLORS["danger"], s=55, alpha=0.95,
+                   edgecolors="black", linewidths=0.4,
+                   label=f"Pareto 前沿 (n={int(mask_pareto.sum())})")
+
+    # 加权 F 最小的 top-1（金色星标）
+    if "F_objective" in results_df.columns and len(results_df) > 0:
+        best = results_df.loc[results_df["F_objective"].idxmin()]
+        ax.scatter([best["attack_rate"] * 100],
+                   [best["peak_I_rate"] * 100],
+                   [best["cost_score"]],
+                   c=COLORS["warn"], s=220, marker="*",
+                   edgecolors="black", linewidths=1.0, zorder=10,
+                   label=f"加权 F 最优 (F={best['F_objective']:.3f})")
+        u_text = (
+            f"u = ({best.get('mask_level', 0):.2f}, {best.get('ventilation', 0):.2f}, "
+            f"{best.get('vaccination', 0):.2f}, {best.get('isolation_rate', 0):.2f}, "
+            f"{best.get('online_teaching', 0):.2f}, {best.get('activity_limit', 0):.2f}, "
+            f"{best.get('disinfection', 0):.2f})"
+        )
+        fig.text(0.02, 0.02, u_text, fontsize=9,
+                 bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                           edgecolor=COLORS["baseline"], alpha=0.85))
+
+    ax.set_xlabel("累计发病率 AR (%)", fontsize=11, labelpad=8)
+    ax.set_ylabel("峰值感染率 PIP (%)", fontsize=11, labelpad=8)
+    ax.set_zlabel("综合成本 Cost", fontsize=11, labelpad=8)
+    ax.view_init(elev=22, azim=-58)
+    ax.legend(loc="upper left", fontsize=9)
+
+    plt.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return fig
+
+
+def plot_scenario_intensity_matrix(
+    matrix:      dict,
+    metric:      str = "I_rate",
+    title:       str = "场景 × 强度 防控效果矩阵",
+    output_path: str | Path | None = None,
+    show:        bool = False,
+) -> plt.Figure:
+    """1×N 列布局：每列一个场景，子图内叠加低/中/高三档强度曲线 + 无干预基线。
+
+    Args:
+        matrix: {(scenario_name, intensity_label): {
+                    "before": df, "after": df,
+                    "ar_before", "ar_after", "peak_before", "peak_after",
+                    "bundle": InterventionBundle }}
+    """
+    setup_style()
+
+    scenarios   = list(dict.fromkeys(k[0] for k in matrix.keys()))
+    intensities = list(dict.fromkeys(k[1] for k in matrix.keys()))
+    n_col = len(scenarios)
+
+    fig, axes = plt.subplots(1, n_col,
+                             figsize=(6.0 * n_col, 5.2),
+                             sharex=True, squeeze=False)
+    axes = axes[0]
+    fig.suptitle(title, fontsize=16, fontweight="bold", y=1.02)
+
+    level_colors = {
+        "低强度": "#43A047",  # 绿
+        "中强度": "#F9A825",  # 黄
+        "高强度": "#E53935",  # 红
+    }
+
+    for j, sc_name in enumerate(scenarios):
+        ax = axes[j]
+
+        # 无干预基线（取该场景下任一强度记录即可，三者 before 相同）
+        base_d = next((matrix[(sc_name, lv)] for lv in intensities
+                       if (sc_name, lv) in matrix), None)
+        if base_d is None:
+            ax.axis("off")
+            continue
+        df_b = base_d["before"]
+        ax.plot(df_b["t"], df_b[metric],
+                color=COLORS["baseline"], linewidth=2.0, linestyle="--",
+                label="无干预", alpha=0.9)
+
+        # 叠加三档强度曲线
+        info_lines = [
+            f"无干预  AR={base_d['ar_before']:.1%}  峰={base_d['peak_before']:.1%}"
+        ]
+        for level in intensities:
+            d = matrix.get((sc_name, level))
+            if d is None:
+                continue
+            df_a = d["after"]
+            c = level_colors.get(level, COLORS["danger"])
+            ax.plot(df_a["t"], df_a[metric],
+                    color=c, linewidth=2.2, linestyle="-",
+                    label=level, alpha=0.95)
+
+            ar_red = (1 - d["ar_after"] / max(d["ar_before"], 1e-9)) * 100
+            pk_red = (1 - d["peak_after"] / max(d["peak_before"], 1e-9)) * 100
+            info_lines.append(
+                f"{level}  AR={d['ar_after']:.1%} (↓{ar_red:.0f}%)  "
+                f"峰={d['peak_after']:.1%} (↓{pk_red:.0f}%)"
+            )
+
+        ax.set_title(sc_name, fontsize=13, fontweight="bold")
+        ax.set_xlabel("模拟天数（天）", fontsize=10)
+        if j == 0:
+            ax.set_ylabel("感染率", fontsize=11)
+        if "rate" in metric:
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
+        ax.legend(loc="upper right", fontsize=9)
+
+    plt.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return fig
+
+
 def _pareto_mask(
     x: np.ndarray,
     y: np.ndarray,

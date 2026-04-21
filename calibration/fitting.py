@@ -109,7 +109,7 @@ def fit_model(
             "delta2": (0.00, 0.80),
             "phi1":   (-np.pi, np.pi),
             "phi2":   (-np.pi, np.pi),
-            "alpha":  (0.01, 0.80),
+            "alpha":  (0.05, 0.80),
         }
 
     # 准备观测数据

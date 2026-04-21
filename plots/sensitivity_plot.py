@@ -196,6 +196,59 @@ def plot_r0_heatmap(
     return fig
 
 
+def plot_param_sensitivity_curve(
+    param_name:   str,
+    df_oat:       "pd.DataFrame",
+    param_label:  str,
+    base_val:     float,
+    output_path:  str | Path | None = None,
+    show:         bool = False,
+) -> plt.Figure:
+    """单参数二维敏感性曲线：AR 与峰值感染率对参数值的响应。
+
+    Args:
+        param_name: 参数英文名（用于图标题后缀）
+        df_oat:     列：value, attack_rate, peak_I_rate
+        param_label: 中文带符号标签（如 "基础传播系数 β₀"）
+        base_val:   基准值，用竖线标注
+    """
+    setup_style()
+
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+    ax1.set_title(f"{param_label} 的单参数敏感性", fontsize=13, fontweight="bold")
+
+    x = df_oat["value"].values
+    ar = df_oat["attack_rate"].values * 100
+    peak = df_oat["peak_I_rate"].values * 100
+
+    ax1.plot(x, ar, color=COLORS["danger"], linewidth=2.2,
+             marker="o", markersize=4, label="累计发病率 AR")
+    ax1.set_xlabel(param_label, fontsize=12)
+    ax1.set_ylabel("累计发病率 AR (%)", fontsize=12, color=COLORS["danger"])
+    ax1.tick_params(axis="y", colors=COLORS["danger"])
+
+    ax2 = ax1.twinx()
+    ax2.plot(x, peak, color=COLORS["accent2"], linewidth=1.8,
+             linestyle="--", marker="s", markersize=4, label="峰值感染率 PIP")
+    ax2.set_ylabel("峰值感染率 PIP (%)", fontsize=12, color=COLORS["accent2"])
+    ax2.tick_params(axis="y", colors=COLORS["accent2"])
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="best", fontsize=9)
+
+    plt.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    plt.close(fig)
+    return fig
+
+
 def plot_r0_sensitivity_line(
     param_values: np.ndarray,
     r0_values:    list,
@@ -214,10 +267,6 @@ def plot_r0_sensitivity_line(
     ax1.plot(param_values, r0_values, color=COLORS["danger"],
              linewidth=2.2, label="R₀")
     ax1.axhline(1.0, color="gray", linestyle="--", linewidth=1, label="R₀=1 临界线")
-
-    if base_val is not None:
-        ax1.axvline(base_val, color=COLORS["accent1"], linestyle=":",
-                    linewidth=1.5, label=f"基准值={base_val:.3f}")
 
     ax1.set_xlabel(param_label, fontsize=12)
     ax1.set_ylabel("基本再生数 R₀", fontsize=12, color=COLORS["danger"])

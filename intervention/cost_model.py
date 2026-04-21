@@ -25,38 +25,34 @@ if TYPE_CHECKING:
 # ── 各措施单位成本权重（总和归一化后用于综合评分） ──────────────────────────
 # 数值代表"全强度实施该措施"对应的相对成本（0–1 区间）
 UNIT_COSTS: dict[str, float] = {
-    "mask_level":      0.15,   # 口罩：成本中等，可接受性高
-    "ventilation":     0.20,   # 通风：一次性改造成本较高
-    "vaccination":     0.25,   # 疫苗：大规模接种费用最高
-    "isolation_rate":  0.10,   # 隔离强化：人力成本（宿管/医护）
+    "mask_level":      0.05,   # 口罩：成本中等，可接受性高
+    "ventilation":     0.01,   # 通风：一次性改造成本较高
+    "vaccination":     0.20,   # 疫苗：大规模接种费用最高
+    "isolation_rate":  0.20,   # 隔离强化：人力成本（宿管/医护）
     "online_teaching": 0.18,   # 线上教学：教学质量损失（无货币成本）
-    "activity_limit":  0.07,   # 活动限制：学生体验损失
+    "activity_limit":  0.02,   # 活动限制：学生体验损失
     "disinfection":    0.05,   # 消毒：材料成本低，人力成本低
 }
 
-# ── 教学干扰权重（影响正常教学秩序） ─────────────────────────────────────
+# ── 教学干扰权重（影响正常教学秩序，归一化至总和=1.0） ──────────────────
+# 设计原则：温和措施（口罩/通风/消毒）干扰极低，
+#           破坏性措施（线上教学/活动限流/隔离）干扰显著更高。
+#           这样优化器在"最小化教学干扰"目标压力下，
+#           自然倾向于常态防控方案（只启用低干扰措施）。
 TEACHING_DISRUPTION: dict[str, float] = {
-    "mask_level":      0.05,   # 轻微不适，对教学影响极小
-    "ventilation":     0.02,   # 几乎无教学干扰
-    "vaccination":     0.03,   # 接种日需半天（小影响）
-    "isolation_rate":  0.12,   # 隔离会导致学生缺课
-    "online_teaching": 0.30,   # 线上教学是最主要的教学中断
-    "activity_limit":  0.10,   # 课外活动停止影响校园生活质量
-    "disinfection":    0.02,   # 几乎无教学干扰
+    "mask_level":      0.01,   # 轻微不适，对教学影响极小
+    "ventilation":     0.01,   # 几乎无教学干扰（基础设施改造）
+    "vaccination":     0.06,   # 接种日需半天，组织动员有小影响
+    "isolation_rate":  0.18,   # 隔离导致学生缺课，影响较大
+    "online_teaching": 0.40,   # 线上教学是最主要的教学中断因素
+    "activity_limit":  0.25,   # 课外活动停止严重影响校园生活质量
+    "disinfection":    0.02,   # 偶尔占用教室时间，干扰很小
 }
 
 
-def compute_cost(bundle: "InterventionBundle") -> float:
-    """
-    计算干预措施的综合成本评分（归一化至 [0, 1]）。
-
-    公式：cost = Σᵢ (w_cost_i × uᵢ) + Σᵢ (w_teach_i × uᵢ)
-    按理论最大值（所有措施全强度）归一化。
-
-    Returns:
-        综合成本评分 ∈ [0, 1]
-    """
-    u_vals = {
+def _u_vals(bundle: "InterventionBundle") -> dict[str, float]:
+    """提取 bundle 中各措施的控制变量值。"""
+    return {
         "mask_level":      bundle.mask_level,
         "ventilation":     bundle.ventilation,
         "vaccination":     bundle.vaccination,
@@ -66,16 +62,47 @@ def compute_cost(bundle: "InterventionBundle") -> float:
         "disinfection":    bundle.disinfection,
     }
 
-    econ_cost = sum(UNIT_COSTS[k] * u_vals[k] for k in UNIT_COSTS)
-    teach_cost = sum(TEACHING_DISRUPTION[k] * u_vals[k] for k in TEACHING_DISRUPTION)
 
-    # 最大可能成本（全强度）
-    max_econ  = sum(UNIT_COSTS.values())
-    max_teach = sum(TEACHING_DISRUPTION.values())
+def compute_economic_score(bundle: "InterventionBundle") -> float:
+    """
+    纯经济成本评分（归一化至 [0, 1]）。
 
-    # 加权合并（各占 50%）
-    normalized = 0.5 * (econ_cost / max_econ) + 0.5 * (teach_cost / max_teach)
-    return float(min(normalized, 1.0))
+    公式：score = Σᵢ (UNIT_COSTS[i] × uᵢ) / Σᵢ UNIT_COSTS[i]
+
+    Returns:
+        经济成本评分 ∈ [0, 1]
+    """
+    u = _u_vals(bundle)
+    raw = sum(UNIT_COSTS[k] * u[k] for k in UNIT_COSTS)
+    return float(raw / sum(UNIT_COSTS.values()))
+
+
+def compute_teaching_score(bundle: "InterventionBundle") -> float:
+    """
+    纯教学干扰评分（归一化至 [0, 1]）。
+
+    公式：score = Σᵢ (TEACHING_DISRUPTION[i] × uᵢ) / Σᵢ TEACHING_DISRUPTION[i]
+
+    Returns:
+        教学干扰评分 ∈ [0, 1]
+    """
+    u = _u_vals(bundle)
+    raw = sum(TEACHING_DISRUPTION[k] * u[k] for k in TEACHING_DISRUPTION)
+    return float(raw / sum(TEACHING_DISRUPTION.values()))
+
+
+def compute_cost(bundle: "InterventionBundle") -> float:
+    """
+    综合成本评分（经济50% + 教学50%，归一化至 [0, 1]）。
+    保留用于向后兼容（grid_search 等旧接口）。
+
+    Returns:
+        综合成本评分 ∈ [0, 1]
+    """
+    return float(min(
+        0.5 * compute_economic_score(bundle) + 0.5 * compute_teaching_score(bundle),
+        1.0,
+    ))
 
 
 def compute_economic_cost_yuan(bundle: "InterventionBundle", n_students: int = 27000) -> float:

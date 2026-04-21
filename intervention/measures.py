@@ -32,6 +32,8 @@ LOCATION_WEIGHTS: dict[str, float] = {
 }
 
 
+
+
 @dataclass
 class InterventionBundle:
     """
@@ -103,6 +105,26 @@ PRESET_STRONG = InterventionBundle(
     vaccination=0.5
 )
 
+# ── 三档强度方案（按防控措施类型分组） ───────────────────────────────────────
+# 设计思路：
+#   低强度 (基础防护)   = 仅被动防护，不影响教学：u1 口罩、u2 通风、u7 消毒
+#   中强度 (加强免疫+隔离) = 低强度 + u3 疫苗、u4 隔离
+#   高强度 (全面管控)   = 中强度 + u5 线上、u6 限流
+INTENSITY_BUNDLES: "dict[str, InterventionBundle]" = {
+    "低强度": InterventionBundle(
+        mask_level=0.8, ventilation=0.6, disinfection=0.8,
+    ),
+    "中强度": InterventionBundle(
+        mask_level=0.8, ventilation=0.6, disinfection=0.8,
+        vaccination=0.8, isolation_rate=0.6,
+    ),
+    "高强度": InterventionBundle(
+        mask_level=1.0, ventilation=1.0, disinfection=1.0,
+        vaccination=0.8, isolation_rate=1.0,
+        online_teaching=0.5, activity_limit=0.8,
+    ),
+}
+
 
 def apply_interventions(
     base_params: ModelParams,
@@ -111,7 +133,7 @@ def apply_interventions(
 ) -> ModelParams:
     """
     将干预措施叠加到基础参数，返回修改后的参数副本。
-    所有效果以乘数形式作用，符合独立效果假设。
+    所有效果以乘数形式静态作用，符合独立效果假设。
 
     效果公式（参考文献值）：
         u1 口罩：     β₀ × (1 - 0.17 × u1)
@@ -128,8 +150,8 @@ def apply_interventions(
     p = deepcopy(base_params)
 
     # ── u1: 口罩佩戴 ──────────────────────────────────────────────────────
-    # Cowling 2009: 外科口罩对飞沫/接触传播降低约 17%
-    p = p.update(beta0=p.beta0 * (1.0 - 0.17 * bundle.mask_level))
+    # N95口罩对飞沫/接触传播降低约 30%（Cowling 2009 外科口罩17%，N95可达25~40%）
+    p = p.update(beta0=p.beta0 * (1.0 - 0.30 * bundle.mask_level))
 
     # ── u2: 通风改善（精细化到 per-venue β修饰）────────────────────────────
     # 效果按宿舍/教室的 β修饰 加权分配（β修饰越大，该场所通风越重要）
@@ -143,14 +165,14 @@ def apply_interventions(
     )
 
     # ── u3: 疫苗接种 ──────────────────────────────────────────────────────
-    # 将接种率提升至目标值（0.50），按 u3 比例线性插值
-    vax_target    = 0.50
+    # 将接种率提升至目标值（0.70），按 u3 比例线性插值
+    vax_target    = 0.70
     vax_increment = bundle.vaccination * max(vax_target - p.vax_coverage, 0.0)
     p = p.update(vax_coverage=min(p.vax_coverage + vax_increment, 1.0))
 
     # ── u4: 隔离强化 ──────────────────────────────────────────────────────
-    # 提升病例发现率（α），乘数 1+3u₄，上限 1.0
-    new_alpha = min(p.alpha * (1.0 + 3.0 * bundle.isolation_rate), 1.0)
+    # 提升病例发现率（α），乘数 1+5u₄，上限 1.0
+    new_alpha = min(p.alpha * (1.0 + 5.0 * bundle.isolation_rate), 1.0)
     p = p.update(alpha=new_alpha)
 
     # ── u5: 线上教学（精准减少教室 c11）───────────────────────────────────

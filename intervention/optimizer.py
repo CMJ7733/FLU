@@ -1,23 +1,20 @@
 """
 intervention/optimizer.py — 防控方案多目标优化
 ================================================
-目标函数：
-    F = w₁ × AR + w₂ × PIP + w₃ × Cost
+NSGA-II 三目标优化：
+    F₁ = 累计感染率 AR（相对于无干预基准，归一化）
+    F₂ = 经济成本评分 econ_score ∈ [0,1]
+    F₃ = 教学干扰评分 teaching_score ∈ [0,1]
 
-    AR   = 累计发病率（相对于基准）
-    PIP  = 峰值感染压力（相对于基准）
-    Cost = 综合成本评分 [0,1]
+    三目标独立最小化，输出 Pareto 前沿。
+
+辅助排序用加权综合指标：
+    F_objective = w₁ × AR_norm + w₂ × econ_score + w₃ × teaching_score
 
 优化策略：
     1. 参数网格扫描（暴力搜索，简单可靠，适合 4–5 维）
     2. scipy.optimize.differential_evolution（全局优化）
     3. NSGA-II 多目标遗传算法（pymoo，直接输出 Pareto 前沿）
-
-网格扫描策略：
-    - 对每类措施取 5 个离散级别（0, 0.25, 0.5, 0.75, 1.0）
-    - 7 个参数 × 5 级别 = 5^7 ≈ 78,125 种组合
-    - 筛选条件：Cost ≤ 阈值（如 0.5）
-    - 排序目标：加权得分 F 最小
 """
 
 from __future__ import annotations
@@ -30,26 +27,27 @@ import numpy as np
 import pandas as pd
 
 from .measures import InterventionBundle, apply_interventions, NO_INTERVENTION
-from .cost_model import compute_cost
+from .cost_model import compute_cost, compute_economic_score, compute_teaching_score
 
 log = logging.getLogger(__name__)
 
 
 def _evaluate_bundle(bundle: InterventionBundle, base_params, scenario) -> dict:
-    """对单个干预方案运行 ODE 并返回目标量。"""
+    """对单个干预方案运行 ODE 并返回目标量（含三独立成本指标）。"""
     from model.solver import solve_seiqr, extract_summary
 
     p = scenario.apply_to(base_params)
     p = apply_interventions(p, bundle)
     df = solve_seiqr(p)
     summ = extract_summary(df, p)
-    cost = compute_cost(bundle)
 
     return {
-        "attack_rate":   summ["total_attack_rate"],
-        "peak_I_rate":   summ["peak_I_rate"],
-        "peak_day":      summ["peak_day"],
-        "cost_score":    cost,
+        "attack_rate":      summ["total_attack_rate"],
+        "peak_I_rate":      summ["peak_I_rate"],
+        "peak_day":         summ["peak_day"],
+        "cost_score":       compute_cost(bundle),           # 综合（向后兼容）
+        "econ_score":       compute_economic_score(bundle),  # 纯经济成本
+        "teaching_score":   compute_teaching_score(bundle),  # 纯教学干扰
         **bundle.to_dict(),
     }
 
@@ -63,31 +61,29 @@ def objective_function(
     weights: dict | None = None,
 ) -> float:
     """
-    计算加权目标函数 F。
+    计算加权目标函数 F（三目标加权综合）。
 
     Args:
         bundle:       干预措施
         base_params:  ModelParams 基础参数
         scenario:     Scenario 实例
         baseline_AR:  无干预时的累计发病率
-        baseline_PIP: 无干预时的峰值感染率
-        weights:      {'attack_rate': w1, 'peak_pressure': w2, 'cost': w3}
+        baseline_PIP: 无干预时的峰值感染率（仅供兼容，不再用于目标）
+        weights:      {'attack_rate': w1, 'econ': w2, 'teaching': w3}
 
     Returns:
         F（越小越好）
     """
     if weights is None:
-        weights = {"attack_rate": 0.50, "peak_pressure": 0.30, "cost": 0.20}
+        weights = {"attack_rate": 0.50, "econ": 0.25, "teaching": 0.25}
 
     result = _evaluate_bundle(bundle, base_params, scenario)
 
     ar_norm  = result["attack_rate"] / max(baseline_AR, 1e-6)
-    pip_norm = result["peak_I_rate"] / max(baseline_PIP, 1e-6)
-    cost     = result["cost_score"]
 
-    F = (weights["attack_rate"]   * ar_norm +
-         weights["peak_pressure"] * pip_norm +
-         weights["cost"]          * cost)
+    F = (weights["attack_rate"] * ar_norm +
+         weights.get("econ", 0.25) * result["econ_score"] +
+         weights.get("teaching", 0.25) * result["teaching_score"])
     return F
 
 
@@ -118,7 +114,7 @@ def grid_search(
     from model.solver import solve_seiqr, extract_summary
 
     if weights is None:
-        weights = {"attack_rate": 0.50, "peak_pressure": 0.30, "cost": 0.20}
+        weights = {"attack_rate": 0.50, "econ": 0.25, "teaching": 0.25}
 
     # 计算基准（无干预）
     p_base = scenario.apply_to(base_params)
@@ -163,9 +159,9 @@ def grid_search(
             rec = _evaluate_bundle(bundle, base_params, scenario)
             ar_norm  = rec["attack_rate"] / max(baseline_AR, 1e-6)
             pip_norm = rec["peak_I_rate"] / max(baseline_PIP, 1e-6)
-            F = (weights["attack_rate"]   * ar_norm +
-                 weights["peak_pressure"] * pip_norm +
-                 weights["cost"]          * cost)
+            F = (weights["attack_rate"]  * ar_norm +
+                 weights.get("econ", 0.25) * rec["econ_score"] +
+                 weights.get("teaching", 0.25) * rec["teaching_score"])
 
             rec["F_objective"]      = F
             rec["AR_reduction_pct"] = (1 - ar_norm) * 100
@@ -297,23 +293,27 @@ def nsga2_optimize(
     seed:       int = 42,
     output_dir: str | Path | None = None,
     top_k:      int = 20,
+    return_full: bool = False,
 ) -> pd.DataFrame:
     """
-    使用 NSGA-II 做 3 目标（AR_norm, PIP_norm, Cost）最小化。
+    使用 NSGA-II 做 3 目标最小化（三目标独立，无约束）：
+        F₁ = AR_norm     累计感染率（相对基准）
+        F₂ = econ_score  经济成本评分 [0,1]
+        F₃ = teaching_score 教学干扰评分 [0,1]
 
     Args:
         base_params:  ModelParams 基础参数
         scenario:     Scenario 实例
         pop_size:     种群大小
         n_gen:        演化代数
-        cost_limit:   成本上限（以不等式约束 G = cost - cost_limit ≤ 0 处理）
-        weights:      用于二次排序的加权 F 权重（与 grid_search 一致）
+        cost_limit:   保留参数（不再作为约束，仅用于过滤输出中极端高成本解）
+        weights:      用于二次排序的加权 F 权重
         seed:         随机种子
         output_dir:   结果保存路径
         top_k:        按加权 F 升序返回的前 k 个方案
 
     Returns:
-        DataFrame（top_k 条，列与 grid_search 一致）
+        DataFrame（top_k 条，含 econ_score / teaching_score 列）
     """
     from pymoo.algorithms.moo.nsga2 import NSGA2
     from pymoo.core.problem import ElementwiseProblem
@@ -321,7 +321,7 @@ def nsga2_optimize(
     from model.solver import solve_seiqr, extract_summary
 
     if weights is None:
-        weights = {"attack_rate": 0.50, "peak_pressure": 0.30, "cost": 0.20}
+        weights = {"attack_rate": 0.50, "econ": 0.25, "teaching": 0.25}
 
     # 基准（无干预）
     p_base = scenario.apply_to(base_params)
@@ -331,12 +331,12 @@ def nsga2_optimize(
     baseline_PIP = summ_base["peak_I_rate"]
 
     log.info(f"基准: AR={baseline_AR:.4f}, PeakI={baseline_PIP:.4f}")
-    log.info(f"NSGA-II: pop={pop_size}, n_gen={n_gen}, cost≤{cost_limit}")
+    log.info(f"NSGA-II: pop={pop_size}, n_gen={n_gen}, 3-obj(AR,econ,teaching)")
 
     class _InterventionProblem(ElementwiseProblem):
         def __init__(self):
             super().__init__(
-                n_var=7, n_obj=3, n_ieq_constr=1,
+                n_var=7, n_obj=3, n_ieq_constr=0,
                 xl=np.zeros(7), xu=np.ones(7),
             )
 
@@ -346,16 +346,11 @@ def nsga2_optimize(
                 rec = _evaluate_bundle(bundle, base_params, scenario)
             except Exception as e:
                 log.debug(f"NSGA-II 评估失败 x={x}: {e}")
-                out["F"] = [1e3, 1e3, 1.0]
-                out["G"] = [1.0]
+                out["F"] = [1e3, 1.0, 1.0]
                 return
 
             ar_norm  = rec["attack_rate"] / max(baseline_AR, 1e-6)
-            pip_norm = rec["peak_I_rate"] / max(baseline_PIP, 1e-6)
-            cost     = rec["cost_score"]
-
-            out["F"] = [ar_norm, pip_norm, cost]
-            out["G"] = [cost - cost_limit]
+            out["F"] = [ar_norm, rec["econ_score"], rec["teaching_score"]]
 
     problem   = _InterventionProblem()
     algorithm = NSGA2(pop_size=pop_size)
@@ -366,7 +361,7 @@ def nsga2_optimize(
         seed=seed, verbose=False, save_history=False,
     )
 
-    # 收集最终种群 + 全部演化评估，去重后排序
+    # 收集最终种群 + Pareto 前沿，去重后排序
     rows: list[dict] = []
     seen: set[tuple] = set()
 
@@ -380,14 +375,11 @@ def nsga2_optimize(
             rec = _evaluate_bundle(bundle, base_params, scenario)
         except Exception:
             return key
-        if rec["cost_score"] > cost_limit + 1e-9:
-            return key
         ar_norm  = rec["attack_rate"] / max(baseline_AR, 1e-6)
         pip_norm = rec["peak_I_rate"] / max(baseline_PIP, 1e-6)
-        F = (weights["attack_rate"]   * ar_norm +
-             weights["peak_pressure"] * pip_norm +
-             weights["cost"]          * rec["cost_score"])
-        # 补充原始 u 字段名（_evaluate_bundle 只回传 u1_mask 这类别名）
+        F = (weights["attack_rate"]         * ar_norm +
+             weights.get("econ", 0.25)      * rec["econ_score"] +
+             weights.get("teaching", 0.25)  * rec["teaching_score"])
         rec["mask_level"]      = bundle.mask_level
         rec["ventilation"]     = bundle.ventilation
         rec["vaccination"]     = bundle.vaccination
@@ -395,7 +387,7 @@ def nsga2_optimize(
         rec["online_teaching"] = bundle.online_teaching
         rec["activity_limit"]  = bundle.activity_limit
         rec["disinfection"]    = bundle.disinfection
-        rec["_dedup_key"]      = key
+        rec["_dedup_key"]        = key
         rec["F_objective"]       = F
         rec["AR_reduction_pct"]  = (1 - ar_norm) * 100
         rec["PIP_reduction_pct"] = (1 - pip_norm) * 100
@@ -403,7 +395,7 @@ def nsga2_optimize(
         rows.append(rec)
         return key
 
-    # Pareto 前沿（rank 0）先入表，避免被最终种群的四舍五入键漏掉
+    # Pareto 前沿（rank 0）先入表
     pareto_X = res.X
     if pareto_X is not None and pareto_X.size > 0:
         if pareto_X.ndim == 1:
@@ -425,7 +417,7 @@ def nsga2_optimize(
             rec["_pareto_rank0"] = True
 
     if not rows:
-        log.error("NSGA-II 未产生可行解！请放宽 cost_limit 或增加 n_gen。")
+        log.error("NSGA-II 未产生可行解！请增加 n_gen 或 pop_size。")
         return pd.DataFrame()
 
     df_full   = pd.DataFrame(rows).drop(columns=["_dedup_key"]).sort_values("F_objective").reset_index(drop=True)
@@ -442,4 +434,7 @@ def nsga2_optimize(
         df_full.head(top_k).to_csv(out_path / f"top{top_k}_{tag}.csv", index=False)
         log.info(f"结果已保存至 {out_path}")
 
-    return df_full.head(top_k) if top_k else df_full
+    df_top = df_full.head(top_k) if top_k else df_full
+    if return_full:
+        return df_top, df_full
+    return df_top

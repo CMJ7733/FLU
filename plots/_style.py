@@ -31,33 +31,35 @@ PALETTE_INTERVENTIONS = [
 ]
 
 
-def _find_chinese_font() -> str | None:
-    """查找系统中可用的中文字体。"""
+def _find_chinese_fonts() -> list[str]:
+    """查找系统中可用的中文字体，按优先级返回列表用作 fallback 链。
+
+    Microsoft YaHei 放在最前：覆盖下标/箭头等 SimHei 缺失字形；
+    SimHei/SimSun 作为备选以应对部分缺字场景。
+    """
     candidates = [
-        "SimHei", "Microsoft YaHei", "STSong", "FangSong",  # Windows
-        "WenQuanYi Micro Hei", "Noto Sans CJK SC",           # Linux
-        "PingFang SC", "Heiti SC",                            # macOS
+        "Microsoft YaHei", "SimHei", "SimSun",             # Windows
+        "WenQuanYi Micro Hei", "Noto Sans CJK SC",          # Linux
+        "PingFang SC", "Heiti SC",                           # macOS
         "Arial Unicode MS",
     ]
     available = {f.name for f in fm.fontManager.ttflist}
-    for font in candidates:
-        if font in available:
-            return font
-    return None
+    return [f for f in candidates if f in available]
 
 
 def setup_style(font: str | None = None) -> None:
     """配置 matplotlib 全局样式。"""
     warnings.filterwarnings("ignore", category=UserWarning)
 
-    # 中文字体
+    # 中文字体 fallback 链：匹配失败时按顺序查下一个
     if font is None:
-        font = _find_chinese_font()
-
-    if font:
-        plt.rcParams["font.family"] = [font, "DejaVu Sans"]
+        fonts = _find_chinese_fonts()
     else:
-        # 回退：使用 DejaVu，标签改为英文
+        fonts = [font]
+
+    if fonts:
+        plt.rcParams["font.family"] = fonts + ["DejaVu Sans"]
+    else:
         plt.rcParams["font.family"] = ["DejaVu Sans"]
 
     plt.rcParams.update({

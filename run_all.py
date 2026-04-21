@@ -212,15 +212,28 @@ def step_bootstrap(p, obs_df, fast: bool = False):
 
 # ── Step 4: 模型验证 ────────────────────────────────────────────────────────
 
-def step_validation(p, obs_df, ci_band=None, rho: float = 1.0):
+def step_validation(p, obs_df, ci_band=None, rho: float = 1.0,
+                    obs_weekly=None):
     """计算验证指标，输出验证图。"""
     from model.solver import solve_seiqr
     from calibration.validation import compute_metrics
-    from plots.epidemic_curve import plot_epidemic_curve
+    from plots.epidemic_curve import plot_epidemic_curve, plot_observed_infection_bars
 
     log.info("=" * 60)
     log.info("Step 4: 模型验证")
     log.info("=" * 60)
+
+    # 观测数据柱状图（独立于模拟，输出在所有模拟图之前）
+    if obs_weekly is not None:
+        import json
+        sp_path = DATA_DIR / "seasonal_params.json"
+        sp = json.load(open(sp_path)) if sp_path.exists() else None
+        plot_observed_infection_bars(
+            obs_weekly,
+            seasonal_params=sp,
+            output_path=FIG_DIR / "00_observed_weekly_bars.png",
+        )
+        log.info("已保存观测数据图 → output/figures/00_observed_weekly_bars.png")
 
     df_sim = solve_seiqr(p)
     metrics = compute_metrics(df_sim, obs_df, scale=rho)
@@ -238,13 +251,17 @@ def step_validation(p, obs_df, ci_band=None, rho: float = 1.0):
 # ── Step 5: PRCC 敏感性分析 ─────────────────────────────────────────────────
 
 def step_sensitivity(p, fast: bool = False):
-    """运行 PRCC 敏感性分析，输出 Tornado 图。"""
+    """运行 PRCC + OAT 敏感性分析，输出龙卷风图、单参数二维曲线、R₀ 曲线。"""
     from sensitivity.prcc import run_prcc_analysis
-    from plots.sensitivity_plot import plot_prcc_tornado, plot_r0_sensitivity_line
+    from sensitivity.oat import run_oat_sensitivity
+    from plots.sensitivity_plot import (
+        plot_prcc_tornado, plot_r0_sensitivity_line,
+        plot_param_sensitivity_curve,
+    )
     from model.r0 import r0_sensitivity_table
 
     log.info("=" * 60)
-    log.info("Step 5: PRCC 敏感性分析")
+    log.info("Step 5: 敏感性分析 (PRCC + OAT)")
     log.info("=" * 60)
 
     n_samples = 200 if fast else 1000
@@ -261,8 +278,20 @@ def step_sensitivity(p, fast: bool = False):
         )
         log.info(f"PRCC Tornado 图已保存: 05_prcc_{out_name}.png")
 
+    # ── OAT 单参数二维敏感性曲线 ──
+    n_points = 21 if fast else 31
+    oat_results, oat_labels = run_oat_sensitivity(
+        p, param_variation=0.30, n_points=n_points,
+        output_dir=ROOT / "output" / "sensitivity",
+    )
+    for name, df in oat_results.items():
+        plot_param_sensitivity_curve(
+            name, df, oat_labels[name], getattr(p, name),
+            output_path=FIG_DIR / f"05_oat_{name}.png",
+        )
+    log.info(f"OAT 单参数曲线图已保存（{len(oat_results)} 张）")
+
     # R₀ 单参数敏感性图
-    from plots.sensitivity_plot import plot_r0_sensitivity_line
     beta_vals = np.linspace(0.05, 0.70, 50)
     r0_tbl = r0_sensitivity_table(p, "beta0", beta_vals)
     plot_r0_sensitivity_line(
@@ -319,8 +348,10 @@ def step_optimization(p, fast: bool = False):
     from model.solver import solve_seiqr, extract_summary
     from plots.intervention_compare import (
         plot_intervention_heatmap, plot_pareto_frontier,
-        plot_before_after_intervention,
+        plot_before_after_intervention, plot_pareto_3d,
+        plot_scenario_intensity_matrix,
     )
+    from intervention.measures import INTENSITY_BUNDLES
 
     log.info("=" * 60)
     log.info("Step 7: 防控方案优化 (NSGA-II)")
@@ -331,77 +362,165 @@ def step_optimization(p, fast: bool = False):
 
     comparison: dict = {}
 
-    for sc_name in ["outbreak", "cluster"]:
+    # 冬夏两套场景（通过 t_start_doy 区分）
+    seasonal_configs = [
+        ("winter", 305, "冬季（11月）"),
+        ("summer", 121, "夏季（5月）"),
+    ]
+
+    for sc_name in ["baseline", "outbreak", "cluster"]:
         scenario = SCENARIOS[sc_name]
-        log.info(f"\n优化场景: {scenario.name}")
 
-        df_opt = nsga2_optimize(
-            p, scenario,
-            pop_size=pop_size, n_gen=n_gen,
-            cost_limit=0.65,
-            output_dir=ROOT / "output" / "optimization",
-            top_k=20,
-        )
+        for season_tag, doy, season_label in seasonal_configs:
+            log.info(f"\n优化场景: {scenario.name} — {season_label}")
 
-        if df_opt.empty:
-            continue
+            # 临时修改场景的起始日（不影响原场景对象）
+            original_doy = scenario.t_start_doy
+            scenario.t_start_doy = doy
 
-        # 为热力图添加方案名
-        df_opt["scheme_name"] = [f"方案{i+1}" for i in range(len(df_opt))]
+            df_opt, df_full_opt = nsga2_optimize(
+                p, scenario,
+                pop_size=pop_size, n_gen=n_gen,
+                cost_limit=0.65,
+                output_dir=ROOT / "output" / "optimization" / season_tag,
+                top_k=20,
+                return_full=True,
+            )
 
-        plot_intervention_heatmap(
-            df_opt,
-            title=f"防控效果热力图（{scenario.name}）",
-            output_path=FIG_DIR / f"07_heatmap_{sc_name}.png"
-        )
+            # 恢复原始 t_start_doy
+            scenario.t_start_doy = original_doy
 
-        if "cost_score" in df_opt.columns and "AR_reduction_pct" in df_opt.columns:
-            plot_pareto_frontier(
+            if df_opt.empty:
+                continue
+
+            tag = f"{sc_name}_{season_tag}"
+            suffix = f"_{season_tag}"
+
+            # ── NSGA-II 三目标 3D 图 ──
+            plot_pareto_3d(
+                df_full_opt,
+                title=f"NSGA-II 三目标 Pareto 前沿（{scenario.name}，{season_label}）",
+                output_path=FIG_DIR / f"07_pareto3d_{tag}.png",
+            )
+            log.info(f"3D Pareto 图已保存: 07_pareto3d_{tag}.png")
+
+            # 为热力图添加方案名
+            df_opt["scheme_name"] = [f"方案{i+1}" for i in range(len(df_opt))]
+
+            plot_intervention_heatmap(
                 df_opt,
-                title=f"成本-效益 Pareto 前沿（{scenario.name}）",
-                output_path=FIG_DIR / f"07_pareto_{sc_name}.png"
+                title=f"防控效果热力图（{scenario.name}，{season_label}）",
+                output_path=FIG_DIR / f"07_heatmap_{tag}.png"
             )
 
-        log.info(f"Top-5 方案:")
-        for _, row in df_opt.head(5).iterrows():
-            log.info(
-                f"  F={row.get('F_objective', 0):.4f}  "
-                f"AR降低={row.get('AR_reduction_pct', 0):.1f}%  "
-                f"Cost={row.get('cost_score', 0):.3f}"
-            )
+            if "cost_score" in df_opt.columns and "AR_reduction_pct" in df_opt.columns:
+                plot_pareto_frontier(
+                    df_opt,
+                    title=f"成本-效益 Pareto 前沿（{scenario.name}，{season_label}）",
+                    output_path=FIG_DIR / f"07_pareto_{tag}.png"
+                )
 
-        # ── 干预前后对比数据 ──
-        best = df_opt.iloc[0]
-        best_bundle = InterventionBundle(
-            mask_level     = float(best["mask_level"]),
-            ventilation    = float(best["ventilation"]),
-            vaccination    = float(best["vaccination"]),
-            isolation_rate = float(best["isolation_rate"]),
-            online_teaching= float(best["online_teaching"]),
-            activity_limit = float(best["activity_limit"]),
-            disinfection   = float(best["disinfection"]),
-        )
-        p_sc       = scenario.apply_to(p)
-        df_before  = solve_seiqr(p_sc)
-        df_after   = solve_seiqr(apply_interventions(p_sc, best_bundle))
-        summ_b     = extract_summary(df_before, p_sc)
-        summ_a     = extract_summary(df_after,  p_sc)
-        comparison[scenario.name] = {
-            "before": df_before, "after": df_after,
-            "bundle": best_bundle,
-            "ar_before":   summ_b["total_attack_rate"],
-            "ar_after":    summ_a["total_attack_rate"],
-            "peak_before": summ_b["peak_I_rate"],
-            "peak_after":  summ_a["peak_I_rate"],
-        }
+            log.info(f"Top-5 方案:")
+            for _, row in df_opt.head(5).iterrows():
+                log.info(
+                    f"  F={row.get('F_objective', 0):.4f}  "
+                    f"AR降低={row.get('AR_reduction_pct', 0):.1f}%  "
+                    f"Cost={row.get('cost_score', 0):.3f}"
+                )
+
+            # ── 干预前后对比数据（仅记录，不立即绘图） ──
+            best = df_opt.iloc[0]
+            best_bundle = InterventionBundle(
+                mask_level     = float(best["mask_level"]),
+                ventilation    = float(best["ventilation"]),
+                vaccination    = float(best["vaccination"]),
+                isolation_rate = float(best["isolation_rate"]),
+                online_teaching= float(best["online_teaching"]),
+                activity_limit = float(best["activity_limit"]),
+                disinfection   = float(best["disinfection"]),
+            )
+            p_sc       = scenario.apply_to(p)
+            df_before  = solve_seiqr(p_sc)
+            df_after   = solve_seiqr(apply_interventions(p_sc, best_bundle))
+            summ_b     = extract_summary(df_before, p_sc)
+            summ_a     = extract_summary(df_after,  p_sc)
+            comparison[f"{scenario.name}_{season_tag}"] = {
+                "before": df_before, "after": df_after,
+                "bundle": best_bundle,
+                "ar_before":   summ_b["total_attack_rate"],
+                "ar_after":    summ_a["total_attack_rate"],
+                "peak_before": summ_b["peak_I_rate"],
+                "peak_after":  summ_a["peak_I_rate"],
+                "season":      season_tag,
+                "scenario":     sc_name,
+            }
 
     if comparison:
+        # 只取冬季结果（夏季已在 3D Pareto 图中单独展示）
+        comparison_winter = {
+            k: v for k, v in comparison.items() if k.endswith("_winter")
+        }
+        # 去掉 "_winter" 后缀，让子图标题简洁
+        comparison_winter = {
+            k.replace("_winter", ""): v for k, v in comparison_winter.items()
+        }
         plot_before_after_intervention(
-            comparison,
+            comparison_winter,
             title="最优防控方案干预前后感染曲线对比",
             output_path=FIG_DIR / "08_intervention_before_after.png",
         )
         log.info(f"干预前后对比图已保存: {FIG_DIR / '08_intervention_before_after.png'}")
+
+    # ── 场景 × 强度 矩阵对比 ────────────────────────────────────────
+    log.info("\n生成场景 × 强度 3×3 矩阵对比")
+    matrix: dict = {}
+    summary_rows: list = []
+    for scenario in SCENARIOS.values():
+        p_sc      = scenario.apply_to(p)
+        df_before = solve_seiqr(p_sc)
+        s_before  = extract_summary(df_before, p_sc)
+        for level, bundle in INTENSITY_BUNDLES.items():
+            p_int    = apply_interventions(p_sc, bundle)
+            df_after = solve_seiqr(p_int)
+            s_after  = extract_summary(df_after, p_int)
+            ar_b = s_before["total_attack_rate"]
+            ar_a = s_after["total_attack_rate"]
+            pk_b = s_before["peak_I_rate"]
+            pk_a = s_after["peak_I_rate"]
+            matrix[(scenario.name, level)] = {
+                "before": df_before, "after": df_after,
+                "ar_before": ar_b, "ar_after": ar_a,
+                "peak_before": pk_b, "peak_after": pk_a,
+                "bundle": bundle,
+            }
+            summary_rows.append({
+                "场景":        scenario.name,
+                "强度":        level,
+                "AR_before":   ar_b,
+                "AR_after":    ar_a,
+                "AR_降幅%":    (1 - ar_a / max(ar_b, 1e-9)) * 100,
+                "Peak_before": pk_b,
+                "Peak_after":  pk_a,
+                "Peak_降幅%":  (1 - pk_a / max(pk_b, 1e-9)) * 100,
+                "Cost":        bundle.cost_score(),
+            })
+            log.info(
+                f"  [{scenario.name} / {level}] "
+                f"AR {ar_b:.2%}→{ar_a:.2%}  Peak {pk_b:.2%}→{pk_a:.2%}  "
+                f"Cost={bundle.cost_score():.3f}"
+            )
+
+    plot_scenario_intensity_matrix(
+        matrix,
+        title="场景 × 强度 防控效果矩阵（干预前后对比）",
+        output_path=FIG_DIR / "09_scenario_intensity_matrix.png",
+    )
+    pd.DataFrame(summary_rows).to_csv(
+        ROOT / "output" / "optimization" / "intensity_matrix_summary.csv",
+        index=False, encoding="utf-8-sig",
+    )
+    log.info(f"强度矩阵图已保存: 09_scenario_intensity_matrix.png")
+    log.info(f"强度矩阵汇总表已保存: intensity_matrix_summary.csv")
 
     return True
 
@@ -439,6 +558,7 @@ def main():
 
     # Step 2: 参数拟合
     obs_df = None
+    obs_weekly = None
     fit_result = None
     if not args.skip_calibration:
         weekly_path = DATA_DIR / "weekly_positivity.csv"
@@ -458,7 +578,8 @@ def main():
     if obs_df is not None and len(obs_df) >= 5:
         ci_result, traj = step_bootstrap(p, obs_df, fast=args.fast)
         ci_band = traj if traj else None
-        step_validation(p, obs_df, ci_band=ci_band, rho=obs_rho)
+        step_validation(p, obs_df, ci_band=ci_band, rho=obs_rho,
+                        obs_weekly=obs_weekly)
     else:
         log.info("跳过 Bootstrap 和验证步骤（无观测数据）")
 

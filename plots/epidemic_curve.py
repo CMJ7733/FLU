@@ -6,6 +6,7 @@ plots/epidemic_curve.py — 流行曲线可视化
     2. 与 FluNet 观测数据叠加的验证图（含 Bootstrap 置信带）
     3. β(t) 季节函数曲线（附学期调制）
     4. S/E/I/Q/R 各仓室全时序图
+    5. WHO FluNet 观测数据柱状图 + 季节波动曲线
 """
 
 from __future__ import annotations
@@ -221,6 +222,120 @@ def plot_beta_seasonal(
     ax.set_xlabel("模拟天数（天）")
     ax.set_ylabel("传播系数 β")
     ax.legend(loc="upper left")
+
+    plt.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+def plot_observed_infection_bars(
+    weekly_df: pd.DataFrame,
+    seasonal_params: dict | None = None,
+    title: str = "WHO FluNet 流感监测数据（2014–2024，中国）",
+    output_path: str | Path | None = None,
+    show: bool = False,
+) -> plt.Figure:
+    """
+    双面板观测数据图：
+      上图：每周流感阳性检出数柱状图（inf_all），按季节着色，
+           右 y 轴叠加归一化季节波动曲线 β_norm(DOY)。
+      下图：h3n2_pos_rate + overall_pos_rate 折线，
+           右 y 轴叠加归一化季节波动曲线。
+
+    Args:
+        weekly_df:       data/processed/weekly_positivity.csv 的 DataFrame
+        seasonal_params: data/processed/seasonal_params.json 内容（含 delta1/2, phi1/2）
+        title:           图表标题
+        output_path:     保存路径
+        show:            是否显示
+    """
+    setup_style()
+
+    df = weekly_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+
+    # ── 季节波动曲线 ──────────────────────────────────────────────
+    if seasonal_params:
+        d1   = seasonal_params["delta1"]
+        d2   = seasonal_params["delta2"]
+        phi1 = seasonal_params["phi1_rad"]
+        phi2 = seasonal_params["phi2_rad"]
+        doys = df["date"].dt.dayofyear.values.astype(float)
+        beta_norm = (
+            1.0
+            + d1 * np.cos(2 * np.pi * doys / 365 + phi1)
+            + d2 * np.cos(4 * np.pi * doys / 365 + phi2)
+        )
+        bn_min, bn_max = beta_norm.min(), beta_norm.max()
+        bn_scaled = (beta_norm - bn_min) / (bn_max - bn_min) if bn_max > bn_min else beta_norm
+    else:
+        bn_scaled = None
+
+    # ── 季节标签颜色（使用 peak_label 列） ───────────────────────────
+    peak_colors = {
+        "winter-peak":  "#1976D2",
+        "summer-peak":  "#FB8C00",
+        "off-peak":     "#9E9E9E",
+    }
+    bar_colors = df["peak_label"].map(peak_colors).fillna("#9E9E9E")
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=0.98)
+
+    # ── 上图：柱状图 + 季节曲线 ───────────────────────────────────
+    ax1.bar(df["date"], df["inf_all"], width=6, color=bar_colors, alpha=0.75)
+    ax1.set_ylabel("流感阳性检出数（例/周）", fontsize=11)
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}"))
+
+    if bn_scaled is not None:
+        ax1r = ax1.twinx()
+        ax1r.plot(df["date"], bn_scaled, color=COLORS["danger"],
+                  linewidth=1.8, linestyle="--", alpha=0.85,
+                  label="β(t) 季节系数（归一化）")
+        ax1r.set_ylim(0, 1.4)
+        ax1r.set_ylabel("季节系数（归一化）", color=COLORS["danger"], fontsize=10)
+        ax1r.tick_params(axis="y", colors=COLORS["danger"])
+        handles1 = [
+            mpatches.Patch(color="#1976D2", label="冬季高峰"),
+            mpatches.Patch(color="#FB8C00", label="夏季高峰"),
+            mpatches.Patch(color="#9E9E9E", label="淡季"),
+        ]
+        ax1.legend(handles=handles1, loc="upper right", fontsize=9)
+    ax1.set_title("（上图）周度流感阳性检出数", fontsize=10, color="gray")
+
+    # ── 下图：阳性率折线 + 季节曲线 ───────────────────────────────
+    ax2.plot(df["date"], df["h3n2_pos_rate"] * 100,
+             color=COLORS["student"], linewidth=1.5, label="H3N2 阳性率")
+    ax2.plot(df["date"], df["overall_pos_rate"] * 100,
+             color=COLORS["staff"], linewidth=1.5, linestyle="--", label="总流感阳性率")
+    ax2.set_ylabel("阳性率（%）", fontsize=11)
+    ax2.set_xlabel("日期", fontsize=11)
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0f}%"))
+
+    if bn_scaled is not None:
+        ax2r = ax2.twinx()
+        ax2r.plot(df["date"], bn_scaled, color=COLORS["danger"],
+                  linewidth=1.8, linestyle="--", alpha=0.85,
+                  label="β(t) 季节系数")
+        ax2r.set_ylim(0, 1.4)
+        ax2r.set_ylabel("季节系数（归一化）", color=COLORS["danger"], fontsize=10)
+        ax2r.tick_params(axis="y", colors=COLORS["danger"])
+
+    ax2.legend(loc="upper right", fontsize=9)
+    ax2.set_title("（下图）周度流感阳性率", fontsize=10, color="gray")
+
+    # x 轴年份刻度
+    import matplotlib.dates as mdates
+    ax2.xaxis.set_major_locator(mdates.YearLocator())
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
 
     plt.tight_layout()
 
