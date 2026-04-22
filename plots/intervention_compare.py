@@ -283,6 +283,8 @@ def plot_before_after_intervention(
         # 指标文本框
         ar_b, ar_a = d["ar_before"], d["ar_after"]
         pk_b, pk_a = d["peak_before"], d["peak_after"]
+        ar_a = round(ar_a, 4)
+        pk_a = round(pk_a, 4)
         ar_red = (1 - ar_a / max(ar_b, 1e-9)) * 100
         pk_red = (1 - pk_a / max(pk_b, 1e-9)) * 100
         bundle = d["bundle"]
@@ -460,11 +462,13 @@ def plot_scenario_intensity_matrix(
                     color=c, linewidth=2.2, linestyle="-",
                     label=level, alpha=0.95)
 
-            ar_red = (1 - d["ar_after"] / max(d["ar_before"], 1e-9)) * 100
-            pk_red = (1 - d["peak_after"] / max(d["peak_before"], 1e-9)) * 100
+            ar_after_rounded = round(d["ar_after"], 4)
+            pk_after_rounded = round(d["peak_after"], 4)
+            ar_red = (1 - ar_after_rounded / max(d["ar_before"], 1e-9)) * 100
+            pk_red = (1 - pk_after_rounded / max(d["peak_before"], 1e-9)) * 100
             info_lines.append(
-                f"{level}  AR={d['ar_after']:.1%} (↓{ar_red:.0f}%)  "
-                f"峰={d['peak_after']:.1%} (↓{pk_red:.0f}%)"
+                f"{level}  AR={ar_after_rounded:.1%} (↓{ar_red:.0f}%)  "
+                f"峰={pk_after_rounded:.1%} (↓{pk_red:.0f}%)"
             )
 
         ax.set_title(sc_name, fontsize=13, fontweight="bold")
@@ -474,6 +478,108 @@ def plot_scenario_intensity_matrix(
         if "rate" in metric:
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
         ax.legend(loc="upper right", fontsize=9)
+
+    plt.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return fig
+
+
+def plot_before_after_intervention_2seasons(
+    comparison:  dict,
+    metric:      str = "I_rate",
+    title:       str = "最优防控方案干预前后感染曲线对比",
+    output_path: str | Path | None = None,
+    show:        bool = False,
+) -> plt.Figure:
+    """3行×2列布局：每行一个场景，每列一个季节（冬季/夏季）。
+
+    Args:
+        comparison: 结构同 plot_before_after_intervention，
+                    key 形如 "场景名_winter" / "场景名_summer"。
+        metric:    绘制指标列名（默认 I_rate）
+    """
+    setup_style()
+
+    # 按场景分组、季节排序
+    scenario_names = sorted(set(k.replace("_winter", "").replace("_summer", "")
+                                for k in comparison.keys()))
+    seasons = ["winter", "summer"]
+    season_labels = {"winter": "冬春季", "summer": "夏秋季"}
+
+    n_row, n_col = len(scenario_names), len(seasons)
+    fig, axes = plt.subplots(n_row, n_col,
+                              figsize=(6 * n_col, 5.0 * n_row),
+                              sharex=True, squeeze=False)
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=1.01)
+
+    for i, sc_name in enumerate(scenario_names):
+        for j, season in enumerate(seasons):
+            key = f"{sc_name}_{season}"
+            ax  = axes[i, j]
+
+            if key not in comparison:
+                ax.axis("off")
+                continue
+
+            d = comparison[key]
+            df_b, df_a = d["before"], d["after"]
+
+            ax.plot(df_b["t"], df_b[metric],
+                    color=COLORS["baseline"], linewidth=2.0, linestyle="--",
+                    label="无干预", alpha=0.9)
+            ax.plot(df_a["t"], df_a[metric],
+                    color=COLORS["danger"], linewidth=2.5, linestyle="-",
+                    label="最优方案", alpha=0.95)
+
+            ib = int(df_b[metric].values.argmax())
+            ia = int(df_a[metric].values.argmax())
+            ax.scatter([df_b["t"].iloc[ib]], [df_b[metric].iloc[ib]],
+                       color=COLORS["baseline"], s=40, zorder=5)
+            ax.scatter([df_a["t"].iloc[ia]], [df_a[metric].iloc[ia]],
+                       color=COLORS["danger"], s=50, zorder=5)
+
+            ar_b, ar_a = d["ar_before"], d["ar_after"]
+            pk_b, pk_a = d["peak_before"], d["peak_after"]
+            ar_a = round(ar_a, 4)
+            pk_a = round(pk_a, 4)
+            ar_red = (1 - ar_a / max(ar_b, 1e-9)) * 100
+            pk_red = (1 - pk_a / max(pk_b, 1e-9)) * 100
+            bundle = d["bundle"]
+            info = (
+                f"AR:   {ar_b:.1%} → {ar_a:.1%}  (↓{ar_red:.1f}%)\n"
+                f"峰值: {pk_b:.1%} → {pk_a:.1%}  (↓{pk_red:.1f}%)\n"
+                f"u=({bundle.mask_level:.1f},{bundle.ventilation:.1f},"
+                f"{bundle.vaccination:.1f},{bundle.isolation_rate:.1f},"
+                f"{bundle.online_teaching:.1f},{bundle.activity_limit:.1f},"
+                f"{bundle.disinfection:.1f})"
+            )
+            ax.text(0.03, 0.97, info, transform=ax.transAxes,
+                    fontsize=8.5, va="top", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.5",
+                              facecolor="white", edgecolor=COLORS["baseline"],
+                              alpha=0.9))
+
+            # 列标题：季节标签（仅第一行显示）
+            if i == 0:
+                ax.set_title(season_labels[season], fontsize=12,
+                             fontweight="bold", pad=6)
+
+            # 行标签：场景名（仅第一列显示）
+            if j == 0:
+                ax.set_ylabel(sc_name, fontsize=10, fontweight="bold")
+
+            ax.set_xlabel("模拟天数（天）", fontsize=9)
+            if "rate" in metric:
+                ax.yaxis.set_major_formatter(
+                    plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
+                ax.set_ylabel("感染率", fontsize=9)
+            ax.legend(loc="upper right", fontsize=8)
 
     plt.tight_layout()
 

@@ -336,7 +336,7 @@ def nsga2_optimize(
     class _InterventionProblem(ElementwiseProblem):
         def __init__(self):
             super().__init__(
-                n_var=7, n_obj=3, n_ieq_constr=0,
+                n_var=7, n_obj=3, n_ieq_constr=1,
                 xl=np.zeros(7), xu=np.ones(7),
             )
 
@@ -347,10 +347,12 @@ def nsga2_optimize(
             except Exception as e:
                 log.debug(f"NSGA-II 评估失败 x={x}: {e}")
                 out["F"] = [1e3, 1.0, 1.0]
+                out["G"] = [1.0]
                 return
 
-            ar_norm  = rec["attack_rate"] / max(baseline_AR, 1e-6)
+            ar_norm = rec["attack_rate"] / max(baseline_AR, 1e-6)
             out["F"] = [ar_norm, rec["econ_score"], rec["teaching_score"]]
+            out["G"] = [rec["cost_score"] - cost_limit]
 
     problem   = _InterventionProblem()
     algorithm = NSGA2(pop_size=pop_size)

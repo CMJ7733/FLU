@@ -364,31 +364,28 @@ def step_optimization(p, fast: bool = False):
 
     # 冬夏两套场景（通过 t_start_doy 区分）
     seasonal_configs = [
-        ("winter", 305, "冬季（11月）"),
-        ("summer", 121, "夏季（5月）"),
+        ("winter", 305, "冬春季"),
+        ("summer", 121, "夏秋季"),
     ]
 
     for sc_name in ["baseline", "outbreak", "cluster"]:
         scenario = SCENARIOS[sc_name]
 
+        from copy import deepcopy
         for season_tag, doy, season_label in seasonal_configs:
+            sc_temp = deepcopy(scenario)
+            sc_temp.t_start_doy = doy
+
             log.info(f"\n优化场景: {scenario.name} — {season_label}")
 
-            # 临时修改场景的起始日（不影响原场景对象）
-            original_doy = scenario.t_start_doy
-            scenario.t_start_doy = doy
-
             df_opt, df_full_opt = nsga2_optimize(
-                p, scenario,
+                p, sc_temp,
                 pop_size=pop_size, n_gen=n_gen,
                 cost_limit=0.65,
                 output_dir=ROOT / "output" / "optimization" / season_tag,
                 top_k=20,
                 return_full=True,
             )
-
-            # 恢复原始 t_start_doy
-            scenario.t_start_doy = original_doy
 
             if df_opt.empty:
                 continue
@@ -439,7 +436,7 @@ def step_optimization(p, fast: bool = False):
                 activity_limit = float(best["activity_limit"]),
                 disinfection   = float(best["disinfection"]),
             )
-            p_sc       = scenario.apply_to(p)
+            p_sc       = sc_temp.apply_to(p)
             df_before  = solve_seiqr(p_sc)
             df_after   = solve_seiqr(apply_interventions(p_sc, best_bundle))
             summ_b     = extract_summary(df_before, p_sc)
@@ -456,20 +453,29 @@ def step_optimization(p, fast: bool = False):
             }
 
     if comparison:
-        # 只取冬季结果（夏季已在 3D Pareto 图中单独展示）
+        # ── 冬季图（1×3 布局） ─────────────────────────────────────
         comparison_winter = {
-            k: v for k, v in comparison.items() if k.endswith("_winter")
-        }
-        # 去掉 "_winter" 后缀，让子图标题简洁
-        comparison_winter = {
-            k.replace("_winter", ""): v for k, v in comparison_winter.items()
+            k.replace("_winter", ""): v
+            for k, v in comparison.items() if k.endswith("_winter")
         }
         plot_before_after_intervention(
             comparison_winter,
             title="最优防控方案干预前后感染曲线对比",
             output_path=FIG_DIR / "08_intervention_before_after.png",
         )
-        log.info(f"干预前后对比图已保存: {FIG_DIR / '08_intervention_before_after.png'}")
+        log.info(f"干预前后对比图（冬季）已保存: {FIG_DIR / '08_intervention_before_after.png'}")
+
+        # ── 夏季图（1×3 布局） ─────────────────────────────────────
+        comparison_summer = {
+            k.replace("_summer", ""): v
+            for k, v in comparison.items() if k.endswith("_summer")
+        }
+        plot_before_after_intervention(
+            comparison_summer,
+            title="最优防控方案干预前后感染曲线对比",
+            output_path=FIG_DIR / "08b_intervention_before_after_summer.png",
+        )
+        log.info(f"干预前后对比图（夏季）已保存: {FIG_DIR / '08b_intervention_before_after_summer.png'}")
 
     # ── 场景 × 强度 矩阵对比 ────────────────────────────────────────
     log.info("\n生成场景 × 强度 3×3 矩阵对比")
